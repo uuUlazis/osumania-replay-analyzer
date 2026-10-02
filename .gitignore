@@ -1,0 +1,16 @@
+# build outputs
+build/
+release/
+frontend/dist/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+# runtime data (webview profile, logs, state)
+webview-profile/
+*.state
+debug.log
+# toolchain artifacts
+*.obj
+*.exe
+*.pdb
+# local test data (personal replays / audio / skins - not for distribution)
+test/

@@ -1,0 +1,66 @@
+#pragma once
+// In-memory session state: one loaded replay+beatmap pair plus analysis
+// results and segment bookmarks. Single-user desktop app: no locking beyond a
+// mutex for HTTP handler thread safety.
+#include "beatmap/osu_parser.h"
+#include "mania/analysis.h"
+#include "mania/hit_matcher.h"
+#include "replay/osr_reader.h"
+#include "replay/replay_frames.h"
+
+#include <cstdint>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace mra {
+
+struct ReplaySegment {
+    int64_t id = 0;
+    int64_t startTimeMs = 0;
+    int64_t endTimeMs = 0;
+    std::string label;
+};
+
+struct ReplaySession {
+    std::string id;                       // session uuid
+    std::string replayPath;
+    std::string beatmapPath;
+    std::optional<std::string> skinFolder;
+    OsrParseResult replay;
+    std::vector<ReplayFrame> frames;
+    int keyCount = 0;   // resolved from mods, falling back to beatmap
+    OsuBeatmap beatmap;
+    std::string beatmapMd5;   // MD5 of raw .osu bytes (osu! beatmap hash)
+    MatchResult match;     // V1 (stable) rules — powers all stats
+    MatchResult matchV2;   // ScoreV2 rules — renderer 判定规则 V2 view
+    GlobalAnalysis analysis;
+    std::vector<ReplaySegment> segments;
+    std::optional<std::string> audioPath;  // optional music for synced playback
+    bool ready = false;
+};
+
+// Thread-safe session registry (single session for v1, keyed by id).
+class SessionStore {
+  public:
+    static SessionStore& instance();
+
+    // Creates a session id and stores the data.
+    std::string create(ReplaySession session);
+    bool get(const std::string& id, ReplaySession& out) const;
+    bool erase(const std::string& id);
+    std::vector<std::pair<std::string, std::string>> list() const;  // id -> title
+
+    void addSegment(const std::string& id, ReplaySegment seg);
+    bool removeSegment(const std::string& id, int64_t segmentId);
+
+  private:
+    SessionStore() = default;
+    mutable std::mutex mutex_;
+    std::map<std::string, ReplaySession> sessions_;
+    int64_t nextSegmentId_ = 1;
+};
+
+}  // namespace mra
