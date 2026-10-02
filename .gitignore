@@ -14,3 +14,4 @@ debug.log
 *.pdb
 # local test data (personal replays / audio / skins - not for distribution)
 test/
+agent.md
