@@ -100,9 +100,9 @@ struct WebViewAttempt {
 // may be generated beside the program); %TEMP% and --no-sandbox variants
 // cover machines whose profile directory or process-spawn policy breaks the
 // WebView2 runtime bootstrap (controller creation fails with 0x8000FFFF).
-// The beside-exe profile is the LAST resort only, for pathological machines
-// where no system-writable directory works at all; normal machines never
-// reach it, so the release folder stays empty except for the exe.
+// The exe folder is never used: the single-exe build must not create any
+// webview-profile folder next to itself; everything lives under
+// %LOCALAPPDATA%\ManiaReplayAnalyzer (or %TEMP% as fallback).
 // All attempts run against the SAME window: it is created visible up
 // front (skin-editor style) so the app pops immediately, and the WebView2
 // composition target attaches reliably to a window that was never hidden.
@@ -121,12 +121,20 @@ std::vector<WebViewAttempt> buildAttempts() {
         attempts.push_back({local + L"\\WebView2", true,
                             L"local appdata + nosandbox"});
     }
-    std::wstring portable = exeDirectory();
-    if (!portable.empty()) {
-        attempts.push_back({portable + L"\\webview-profile",
-                            forceNoSandbox, L"portable dir (last resort)"});
-        attempts.push_back({portable + L"\\webview-profile", true,
-                            L"portable dir + nosandbox (last resort)"});
+    // %TEMP% fallback for machines whose %LOCALAPPDATA% is unwritable.
+    // The exe folder is NEVER used: the single-exe build creates nothing
+    // beside itself (no webview-profile folder anywhere in the program dir).
+    wchar_t tempPath[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, tempPath) > 0) {
+        std::wstring tempDir = tempPath;
+        while (!tempDir.empty() && (tempDir.back() == L'\\' || tempDir.back() == L'/'))
+            tempDir.pop_back();
+        std::wstring tempProfile =
+            tempDir + L"\\ManiaReplayAnalyzer\\WebView2";
+        attempts.push_back({tempProfile, forceNoSandbox,
+                            L"temp dir"});
+        attempts.push_back({tempProfile, true,
+                            L"temp dir + nosandbox"});
     }
     return attempts;
 }

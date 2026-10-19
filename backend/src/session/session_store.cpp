@@ -79,4 +79,14 @@ bool SessionStore::removeSegment(const std::string& id, int64_t segmentId) {
     return false;
 }
 
+bool SessionStore::setSkinFolder(const std::string& id,
+                                 const std::string& folder) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = sessions_.find(id);
+    if (it == sessions_.end()) return false;
+    it->second.skinFolder =
+        folder.empty() ? std::nullopt : std::optional<std::string>(folder);
+    return true;
+}
+
 }  // namespace mra

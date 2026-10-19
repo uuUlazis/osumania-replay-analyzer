@@ -4,8 +4,8 @@ import { sessionStore, type SessionSnapshot } from "./app/sessionStore";
 import { playerStore } from "./app/playerStore";
 import Layout from "./components/Layout";
 import FileLoader from "./components/FileLoader";
+import ScoreBrowser from "./components/ScoreBrowser";
 import AnalysisSummary from "./components/AnalysisSummary";
-import Diagnostics from "./components/Diagnostics";
 import SegmentPanel from "./components/SegmentPanel";
 import ReplayPreview from "./components/ReplayPreview";
 import Timeline from "./components/Timeline";
@@ -16,8 +16,40 @@ export default function App() {
   const [snap, setSnap] = useState<SessionSnapshot>(sessionStore.get());
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [scoresDb, setScoresDb] = useState<
+    (import("./models/types").ScoresLoadResult & { path: string }) | null
+  >(null);
+  const [browserOpen, setBrowserOpen] = useState(false);
+  const [skinFolder, setSkinFolder] = useState<string | undefined>();
+  const [resolvedPaths, setResolvedPaths] = useState<{
+    replayPath: string;
+    beatmapPath: string;
+    audioPath?: string;
+  } | null>(null);
 
   useEffect(() => sessionStore.subscribe(() => setSnap(sessionStore.get())), []);
+  useEffect(() => {
+    api
+      .lastState()
+      .then((s) => {
+        if (s && typeof s.volume === "number")
+          playerStore.setVolume(s.volume);
+        if (s && typeof s.showInputJudges === "boolean")
+          playerStore.setShowInputJudges(s.showInputJudges);
+      })
+      .catch(() => {});
+  }, []);
+
+  // 右键菜单白名单: 输入控件放行原生菜单, 其余界面一律拦截
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      const t = e.target;
+      if (t instanceof Element && t.closest("input, textarea, select")) return;
+      e.preventDefault();
+    };
+    document.addEventListener("contextmenu", onContextMenu);
+    return () => document.removeEventListener("contextmenu", onContextMenu);
+  }, []);
 
   const loadSession = useCallback(
     async (
@@ -35,6 +67,7 @@ export default function App() {
           skinFolder,
           audioPath,
         );
+        setResolvedPaths({ replayPath, beatmapPath, audioPath });
         const [replay, beatmap, summary, hits, hitsV2, objects, frames] =
           await Promise.all([
             api.replayMetadata(sessionId),
@@ -45,6 +78,11 @@ export default function App() {
             api.objects(sessionId, -8640000000, 8640000000),
             api.frames(sessionId, -8640000000, 8640000000, 400000),
           ]);
+        const mods = replay.mods ?? 0;
+        // DT (1<<6) and NC (1<<9) play at 1.5x, HT (1<<8) at 0.75x
+        playerStore.setRate(
+          mods & 64 || mods & 512 ? 1.5 : mods & 256 ? 0.75 : 1,
+        );
         playerStore.setDuration(
           Math.max(
             objects.objects.length
@@ -75,13 +113,25 @@ export default function App() {
             : String(e);
         setError(msg);
         sessionStore.reset();
+        playerStore.setRate(1);
         playerStore.setMusicUrl(null);
+        setResolvedPaths(null);
       } finally {
         setLoading(false);
       }
     },
     [],
   );
+
+  const applySkin = (folder: string | undefined) => {
+    setSkinFolder(folder);
+    if (snap.sessionId && folder) {
+      api.skinsSelect(snap.sessionId, folder)
+        .then(() => playerStore.bumpSkin())
+        .catch((e) =>
+          setError(e instanceof Error ? e.message : String(e)));
+    }
+  };
 
   const ready = snap.sessionId !== null;
 
@@ -93,7 +143,42 @@ export default function App() {
       </div>
       <div className="main">
         <div className="left-panel">
-          <FileLoader onLoad={loadSession} loading={loading} />
+          <FileLoader
+            onLoad={loadSession}
+            loading={loading}
+            onScoresLoaded={(path, result) => setScoresDb({ ...result, path })}
+            onScoresDatar={() => undefined}
+            onScoresSongs={() => undefined}
+            onOpenBrowser={() => setBrowserOpen(true)}
+            browserReady={!!scoresDb}
+            onSkinFolder={applySkin}
+            resolvedPaths={resolvedPaths}
+          />
+          <ScoreBrowser
+          open={browserOpen}
+          onClose={() => setBrowserOpen(false)}
+          loading={loading}
+          onPlay={(playedTicks) => {
+            setBrowserOpen(false);
+            void (async () => {
+              setLoading(true);
+              setError(null);
+              try {
+                const r = await api.scoresLoadReplay(playedTicks, skinFolder);
+                await loadSession(
+                  r.replayPath,
+                  r.beatmapPath,
+                  skinFolder,
+                  r.audioPath || undefined,
+                );
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setLoading(false);
+              }
+            })();
+          }}
+        />
           {error && <div className="error-banner">{error}</div>}
           {!ready && !error && (
             <div className="empty-hint">
@@ -103,7 +188,6 @@ export default function App() {
           {ready && (
             <>
               <AnalysisSummary />
-              <Diagnostics />
               <SegmentPanel />
             </>
           )}

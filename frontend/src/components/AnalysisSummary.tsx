@@ -45,6 +45,9 @@ export default function AnalysisSummary() {
   return (
     <div className="panel">
       <h2>总览</h2>
+      <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 4 }}>
+        由于stable的屎山代码，acc计算可能不会完全准确
+      </div>
       {snap.replay && (
         <div className="stat-grid" style={{ marginBottom: 8 }}>
           <div className="stat">
@@ -52,15 +55,24 @@ export default function AnalysisSummary() {
             <div className="value" style={{ fontSize: 14 }}>{snap.replay.player}</div>
           </div>
           <div className="stat">
-            <div className="label">ACC (V1 / V2)</div>
+            <div className="label">ACC</div>
             <div className="value" style={{ fontSize: 14 }}>
-              {a.accuracy.scoreV1.toFixed(2)}% / {a.accuracy.scoreV2.toFixed(2)}%
+              {(a.rulesProfile === "v2"
+                ? a.accuracy.scoreV2
+                : a.accuracy.scoreV1).toFixed(2)}
+              %
             </div>
           </div>
           <div className="stat">
-            <div className="label">Score / Combo</div>
+            <div className="label">Score</div>
             <div className="value" style={{ fontSize: 14 }}>
-              {snap.replay.score.toLocaleString()} / {snap.replay.maxCombo}x
+              {snap.replay.score.toLocaleString()}
+            </div>
+          </div>
+          <div className="stat">
+            <div className="label">Combo</div>
+            <div className="value" style={{ fontSize: 14 }}>
+              {snap.replay.maxCombo}x
             </div>
           </div>
           <div className="stat">

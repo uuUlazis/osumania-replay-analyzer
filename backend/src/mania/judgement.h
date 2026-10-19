@@ -22,13 +22,15 @@ enum class HitPhase { NoteHead, HoldHead, HoldTail };
 const char* hitResultName(HitResult r);       // "MAX" | "300" | "200" | "100" | "50" | "MISS"
 int hitResultScoreValue(HitResult r);         // 320-style numeric (display only)
 
+// OD8 snapshot defaults; fromOD() is the only production window source
+// (api_server), defaults never reach the engine.
 struct ManiaWindows {
     double perfect = 16;
     double great = 40;
     double good = 73;
     double ok = 103;
     double meh = 127;
-    double miss = 158;
+    double miss = 164;
 
     static ManiaWindows fromOD(double od);
 };

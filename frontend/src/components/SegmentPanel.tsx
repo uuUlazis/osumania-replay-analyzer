@@ -37,16 +37,19 @@ export default function SegmentPanel() {
         )}
         {!sel && (
           <span className="range" style={{ color: "var(--text-dim)" }}>
-            先在时间轴上框选一个区间
+            在时间轴上右键拖动选择一个区间
           </span>
         )}
       </div>
       {seg && (
         <div className="stat-grid" style={{ marginTop: 8 }}>
           <div className="stat">
-            <div className="label">选段 ACC (V1 / V2)</div>
+            <div className="label">选段 ACC</div>
             <div className="value" style={{ fontSize: 14 }}>
-              {seg.accuracyScoreV1.toFixed(2)}% / {seg.accuracyScoreV2.toFixed(2)}%
+              {((snap.analysis?.rulesProfile ?? "v1") === "v2"
+                ? seg.accuracyScoreV2
+                : seg.accuracyScoreV1).toFixed(2)}
+              %
             </div>
           </div>
           <div className="stat">

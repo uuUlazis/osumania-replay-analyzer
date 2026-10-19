@@ -58,6 +58,7 @@ export interface ConsistencyItem {
 
 export interface AnalysisSummary {
   counts: JudgementCounts;
+  rulesProfile: "v1" | "v2";
   headCounts: JudgementCounts;
   accuracy: { scoreV1: number; scoreV2: number };
   offsets: OffsetStats;
@@ -210,3 +211,81 @@ export const JUDGEMENT_TICK_HEIGHT: Record<string, number> = {
   "50": 0.88,
   MISS: 1.0,
 };
+
+// ---- scores.db (osu! stable local score browser) ----
+export interface ScoreEntryDto {
+  mode: number;
+  clientVersion: number;
+  beatmapMd5: string;
+  playerName: string;
+  replayMd5: string;
+  c300: number;
+  c100: number;
+  c50: number;
+  geki: number;
+  katu: number;
+  miss: number;
+  totalScore: number;
+  maxCombo: number;
+  fullCombo: boolean;
+  mods: number;
+  playedMs: number;
+  onlineId: number;
+}
+
+export interface ScoresLoadResult {
+  version: number;
+  groups: number;
+  total: number;
+  byMode: { mode: number; count: number }[];
+  dataRAuto: boolean;
+  dataRFolder: string;
+  dataRHint: string;
+}
+
+export interface ScoreBrowseRow {
+  mode: number;
+  beatmapMd5: string;
+  playerName: string;
+  replayMd5: string;
+  c300: number;
+  c100: number;
+  c50: number;
+  geki: number;
+  katu: number;
+  miss: number;
+  totalScore: number;
+  maxCombo: number;
+  fullCombo: boolean;
+  mods: number;
+  playedMs: number;
+  // 100 ns .NET ticks as a string (exceeds JS safe-integer range)
+  playedTicks: string;
+  onlineId: number;
+  title: string;
+  artist: string;
+  creator: string;
+  version: string;
+  keyCount: string;
+  hasReplay: boolean;
+}
+
+export interface ScoresListResult {
+  total: number;
+  returned: number;
+  scores: ScoreEntryDto[];
+}
+
+// legacy mod flags (key mods 1K-9K are handled separately in ScoreBrowser)
+export const MOD_NAMES: [number, string][] = [
+  [1, "NF"], [2, "EZ"], [4, "TD"], [8, "HD"], [16, "HR"], [32, "SD"],
+  [64, "DT"], [128, "RX"], [256, "HT"], [512, "NC"], [1024, "FL"],
+  [2048, "AT"], [4096, "SO"], [8192, "AP"], [16384, "PF"], [1048576, "FI"],
+  [2097152, "RD"], [4194304, "CN"], [8388608, "TP"], [33554432, "KC"],
+  [536870912, "V2"],
+];
+export const KEY_MOD_NAMES: [number, string][] = [
+  [1 << 26, "1K"], [1 << 27, "2K"], [1 << 28, "3K"],
+  [1 << 15, "4K"], [1 << 16, "5K"], [1 << 17, "6K"], [1 << 18, "7K"],
+  [1 << 19, "8K"], [1 << 24, "9K"],
+];

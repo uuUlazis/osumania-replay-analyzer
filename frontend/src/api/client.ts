@@ -111,4 +111,44 @@ export const api = {
       `/api/analysis/${sid}/segment`,
       { startMs, endMs },
     ),
+  scoresLoad: (path: string) =>
+    call<import("../models/types").ScoresLoadResult>(
+      "POST",
+      "/api/scores/load",
+      { path },
+    ),
+  skinsSelect: (sessionId: string, folder: string) =>
+    call<{ folder: string }>("POST", "/api/skins/select", { sessionId, folder }),
+  scoresDataR: (folder: string) =>
+    call<{ dataRFolder: string }>("POST", "/api/scores/datar", { folder }),
+  scoresSongs: (folder: string) =>
+    call<{ songsFolder: string }>("POST", "/api/scores/songs", { folder }),
+  lastState: async () =>
+    call<{
+      scores?: string; dataR?: string; songs?: string; skin?: string;
+      volume?: number;
+      showInputJudges?: boolean;
+    }>("GET", "/api/last-state"),
+  saveLastState: (patch: Record<string, string | number | boolean | null>) =>
+    call("POST", "/api/last-state", patch),
+  scoresBrowse: (mode: number, force?: boolean) =>
+    call<{
+      total: number;
+      replays: number;
+      beatmaps: number;
+      returned: number;
+      scores: import("../models/types").ScoreBrowseRow[];
+    }>("POST", "/api/scores/browse", { mode, force }),
+  scoresLoadReplay: (playedTicks: string, skinFolder?: string) =>
+    call<{
+      sessionId: string;
+      replayPath: string;
+      beatmapPath: string;
+      audioPath: string;
+    }>("POST", "/api/scores/load-replay", { playedTicks, skinFolder }),
+  scoresList: (mode: number, limit = 2000) =>
+    call<import("../models/types").ScoresListResult>(
+      "GET",
+      "/api/scores?mode=" + mode + "&limit=" + limit,
+    ),
 };

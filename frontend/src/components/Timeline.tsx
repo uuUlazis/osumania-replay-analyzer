@@ -1,4 +1,5 @@
-// Timeline: click = jump; long-press (250ms) or drag (>4px) = selection.
+// Timeline: left press/drag = live scrub; right press/drag = selection;
+// right click (degenerate selection) = jump.
 import { useEffect, useRef } from "react";
 import { useSyncExternalStore } from "react";
 import { sessionStore } from "../app/sessionStore";
@@ -9,8 +10,7 @@ import {
   JUDGEMENT_TICK_HEIGHT,
 } from "../models/types";
 
-const LONG_PRESS_MS = 250;
-const DRAG_THRESHOLD_PX = 4;
+const MOVE_THRESHOLD_PX = 3;
 
 export default function Timeline() {
   const snap = useSyncExternalStore(sessionStore.subscribe, sessionStore.get);
@@ -68,10 +68,10 @@ export default function Timeline() {
         ctx.stroke();
       }
     }
-    // selection overlay
+    // selection overlay (normalize so reverse drags draw correctly)
     if (player.selection) {
-      const x1 = xOf(player.selection.startMs);
-      const x2 = xOf(player.selection.endMs);
+      const x1 = xOf(Math.min(player.selection.startMs, player.selection.endMs));
+      const x2 = xOf(Math.max(player.selection.startMs, player.selection.endMs));
       ctx.fillStyle = "rgba(87, 200, 255, 0.18)";
       ctx.fillRect(x1, 0, x2 - x1, h);
       ctx.strokeStyle = "#57c8ff";
@@ -89,9 +89,8 @@ export default function Timeline() {
     pointerId: number;
     startX: number;
     startTime: number;
-    longPressFired: boolean;
+    mode: "scrub" | "select";
     moved: boolean;
-    active: boolean;
   } | null>(null);
 
   const timeAt = (clientX: number) => {
@@ -103,39 +102,34 @@ export default function Timeline() {
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0 && e.button !== 2) return;
     e.currentTarget.setPointerCapture(e.pointerId);
+    const t = timeAt(e.clientX);
+    const mode = e.button === 0 ? "scrub" : "select";
     dragRef.current = {
       pointerId: e.pointerId,
       startX: e.clientX,
-      startTime: timeAt(e.clientX),
-      longPressFired: false,
+      startTime: t,
+      mode,
       moved: false,
-      active: true,
     };
-    const d = dragRef.current;
-    if (d) {
-      window.setTimeout(() => {
-        // long-press begins selection if pointer is still down & unmoved
-        if (dragRef.current && dragRef.current.active && !dragRef.current.moved) {
-          dragRef.current.longPressFired = true;
-          playerStore.setSelection({
-            startMs: dragRef.current.startTime,
-            endMs: dragRef.current.startTime,
-          });
-        }
-      }, LONG_PRESS_MS);
+    if (mode === "scrub") {
+      playerStore.setScrubbing(true);
+      playerStore.seek(t);
+    } else {
+      playerStore.setSelection({ startMs: t, endMs: t });
     }
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const d = dragRef.current;
-    if (!d || !d.active || e.pointerId !== d.pointerId) return;
-    if (Math.abs(e.clientX - d.startX) > DRAG_THRESHOLD_PX) d.moved = true;
-    if (d.moved || d.longPressFired) {
-      const t = timeAt(e.clientX);
-      const a = Math.min(d.startTime, t);
-      const b = Math.max(d.startTime, t);
-      playerStore.setSelection({ startMs: a, endMs: b });
+    if (!d || e.pointerId !== d.pointerId) return;
+    if (Math.abs(e.clientX - d.startX) > MOVE_THRESHOLD_PX) d.moved = true;
+    const t = timeAt(e.clientX);
+    if (d.mode === "scrub") {
+      playerStore.seek(t);
+    } else {
+      playerStore.setSelection({ startMs: d.startTime, endMs: t });
     }
   };
 
@@ -144,21 +138,25 @@ export default function Timeline() {
     dragRef.current = null;
     if (!d) return;
     const endT = timeAt(e.clientX);
-    if (!d.moved && !d.longPressFired) {
-      // single click: jump & clear selection
-      playerStore.seek(endT);
-      playerStore.setSelection(null);
+    if (d.mode === "scrub") {
+      playerStore.setScrubbing(false);
+      if (!d.moved) {
+        // single click: jump & clear selection (a drag keeps the selection)
+        playerStore.setSelection(null);
+      }
       return;
     }
-    // selection finish: normalize; degenerate -> treat as jump
+    // selection finish: normalize; degenerate (right click) -> treat as jump
     const a = Math.min(d.startTime, endT);
     const b = Math.max(d.startTime, endT);
-    if (b - a < 5) {
-      playerStore.setSelection(null);
-      playerStore.seek(endT);
-    } else {
-      playerStore.setSelection({ startMs: a, endMs: b });
-    }
+    playerStore.setSelection(b - a < 5 ? null : { startMs: a, endMs: b });
+    playerStore.seek(endT);
+  };
+
+  const onPointerCancel = () => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (d && d.mode === "scrub") playerStore.setScrubbing(false);
   };
 
   return (
@@ -169,7 +167,8 @@ export default function Timeline() {
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        onPointerCancel={onPointerCancel}
+        onContextMenu={(e) => e.preventDefault()}
       />
     </div>
   );

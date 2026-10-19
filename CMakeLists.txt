@@ -46,6 +46,7 @@ set(MRA_CORE_SOURCES
     ${MRA_BACKEND}/src/replay/replay_decoder.cpp
     ${MRA_BACKEND}/src/replay/replay_frames.cpp
     ${MRA_BACKEND}/src/replay/osr_reader.cpp
+    ${MRA_BACKEND}/src/scores/scores_db.cpp
     ${MRA_BACKEND}/src/session/session_store.cpp
     ${MRA_BACKEND}/src/skin/skin_loader.cpp
     ${MRA_BACKEND}/src/app/dialogs.cpp

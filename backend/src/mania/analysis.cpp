@@ -190,8 +190,22 @@ GlobalAnalysis analyzeMatch(const MatchResult& match, int keyCount) {
     // Hold tails count toward total judgement counts and per-column
     // accuracy; they are tallied from holds[].tail (accumulateCounts skips
     // the HoldTail copies in events).
-    for (const HoldJudgement& h : match.holds)
+    // DEDUPE holds tally: re-judged LNs can hold multiple entries; only
+    // the final resolution per object counts (matches osu!stable).
+    std::map<int, const HoldJudgement*> holdByObj;
+    for (const HoldJudgement& h : match.holds) holdByObj[h.tail.objectIndex] = &h;  // DEDUPE holds tally
+    for (const auto& [oi, hp] : holdByObj) {
+        const HoldJudgement& h = *hp;
         g.counts.add(h.tail.judgement);
+        // Tails were skipped inside accumulateCounts, so track their times
+        // here: otherwise lastEventTimeMs ends before the final LN tail and
+        // a full-range segment would exclude every tail.
+        if (g.firstEventTimeMs < 0 ||
+            h.tail.objectTimeMs < g.firstEventTimeMs)
+            g.firstEventTimeMs = h.tail.objectTimeMs;
+        if (h.tail.objectTimeMs > g.lastEventTimeMs)
+            g.lastEventTimeMs = h.tail.objectTimeMs;
+    }
     std::vector<HitEvent> heads;
     for (const HitEvent& ev : match.events) {
         if (ev.phase == HitPhase::HoldTail) continue;
@@ -209,12 +223,27 @@ GlobalAnalysis analyzeMatch(const MatchResult& match, int keyCount) {
     g.tailOffsets = computeOffsetStats(tailOffs);
     g.accuracyV1 = accuracyPercent(g.counts, AccuracyProfile::LegacyScoreV1);
     g.accuracyV2 = accuracyPercent(g.counts, AccuracyProfile::LegacyScoreV2);
+    // Stable per-object tally: notes keep their head judgement, each LN
+    // contributes ONE combined unit judgement (the matcher's v1Judgement).
+    // This mirrors what osu!stable writes into the .osr counters; lazer
+    // instead tallies LN heads and tails separately (g.counts).
+    for (const HitEvent& ev : match.events) {
+        if (ev.phase != HitPhase::NoteHead) continue;
+        g.stableCounts.add(ev.judgement);
+    }
+    for (const auto& [oi, hp] : holdByObj)
+        g.stableCounts.add(hp->tail.v1Judgement.value_or(hp->tail.judgement));
+    g.stableAccuracyV1 =
+        accuracyPercent(g.stableCounts, AccuracyProfile::LegacyScoreV1);
+    g.stableAccuracyV2 =
+        accuracyPercent(g.stableCounts, AccuracyProfile::LegacyScoreV2);
     g.histogram = buildHistogram(headOffsets(match.events), 5.0, -100, 100);
     g.perColumn = perColumnStats(match.events, keyCount);
-    for (const HoldJudgement& h : match.holds) {
-        if (h.tail.column < 0 || h.tail.column >= keyCount) continue;
-        g.perColumn[static_cast<size_t>(h.tail.column)].counts.add(
-            h.tail.judgement);
+    for (const auto& [oi, hp] : holdByObj) {
+        (void)oi;
+        if (hp->tail.column < 0 || hp->tail.column >= keyCount) continue;
+        g.perColumn[static_cast<size_t>(hp->tail.column)].counts.add(
+            hp->tail.judgement);
     }
     std::map<HitResult, int64_t> byResult;
     for (const HitEvent& ev : match.events) ++byResult[ev.judgement];
@@ -268,6 +297,21 @@ SegmentAnalysis analyzeSegment(const MatchResult& match, int keyCount,
     seg.offsets = computeOffsetStats(offs);
     seg.accuracyV1 = accuracyPercent(seg.counts, AccuracyProfile::LegacyScoreV1);
     seg.accuracyV2 = accuracyPercent(seg.counts, AccuracyProfile::LegacyScoreV2);
+    // Stable per-object tally (attribute each LN at its tail time).
+    for (const HitEvent& ev : inRange) {
+        if (ev.phase != HitPhase::NoteHead) continue;
+        seg.stableCounts.add(ev.judgement);
+    }
+    for (const HoldJudgement& hld : match.holds) {
+        if (hld.tail.objectTimeMs >= startMs &&
+            hld.tail.objectTimeMs < endMs)
+            seg.stableCounts.add(
+                hld.tail.v1Judgement.value_or(hld.tail.judgement));
+    }
+    seg.stableAccuracyV1 =
+        accuracyPercent(seg.stableCounts, AccuracyProfile::LegacyScoreV1);
+    seg.stableAccuracyV2 =
+        accuracyPercent(seg.stableCounts, AccuracyProfile::LegacyScoreV2);
     seg.perColumn = perColumnStats(inRange, keyCount);
     for (const HoldJudgement& hld : match.holds) {
         if (hld.tail.objectTimeMs < startMs ||

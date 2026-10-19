@@ -37,6 +37,13 @@ struct ReplaySession {
     MatchResult match;     // V1 (stable) rules — powers all stats
     MatchResult matchV2;   // ScoreV2 rules — renderer 判定规则 V2 view
     GlobalAnalysis analysis;
+    // true: the .osr counters use stable's one-judgement-per-object model
+    // (LN = single unit, the default / install base); false: lazer-style
+    // heads+tails. Decided at load time by matching the declared total.
+    bool stableCountMode = true;
+    // Which rules pass powers summary/holds/segments (acc-semantics §0.1:
+    // 同一局全链路同口径). true = ScoreV2 (matchV2), false = V1 (match).
+    bool rulesScoreV2 = false;
     std::vector<ReplaySegment> segments;
     std::optional<std::string> audioPath;  // optional music for synced playback
     bool ready = false;
@@ -55,6 +62,9 @@ class SessionStore {
 
     void addSegment(const std::string& id, ReplaySegment seg);
     bool removeSegment(const std::string& id, int64_t segmentId);
+
+    // Replaces the session's skin folder (skin hot-swap without a reload).
+    bool setSkinFolder(const std::string& id, const std::string& folder);
 
   private:
     SessionStore() = default;

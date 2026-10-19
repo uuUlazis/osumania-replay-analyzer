@@ -341,23 +341,37 @@ function drawHoldSprite(
   tailBottom: number,
 ) {
   const c = skin?.columns[col];
-  const head = c?.head ?? c?.note ?? null;
-  const tail = c?.tail ?? head;
-  const body = c?.body ?? null;
+  // Fall back along tail -> head -> note and skip elements whose image did
+  // not load, so a hold still renders when the skin ships only some of the
+  // LN sprites.
+  const head = c?.head && c.head.img ? c.head : c?.note && c.note.img ? c.note : null;
+  const tail = c?.tail && c.tail.img ? c.tail : head;
+  const body = c?.body && c.body.img ? c.body : null;
   const scaleH = skin ? skin.noteHeightScale : cw * 0.5;
-  const headH = head?.img ? Math.max(2, scaleH * (head.img.naturalHeight / head.img.naturalWidth)) : cw * 0.32;
-  const tailH = tail?.img ? Math.max(2, scaleH * (tail.img.naturalHeight / tail.img.naturalWidth)) : headH;
+  let headH = head && head.img
+    ? Math.max(2, scaleH * (head.img.naturalHeight / head.img.naturalWidth))
+    : cw * 0.32;
+  let tailH = tail && tail.img
+    ? Math.max(2, scaleH * (tail.img.naturalHeight / tail.img.naturalWidth))
+    : headH;
 
   // span between head bottom (start time) and tail bottom (end time)
   const spanTop = tailBottom; // later time → higher on screen
   const spanBottom = headBottom;
   if (spanBottom - spanTop < 1) return;
 
+  // Sprite caps: tall note/tail textures (long-body skins) must never
+  // swallow the hold — cap each end cap at 45% of the span so the body
+  // always connects the head note to the LN tail.
+  const capH = Math.max(2, (spanBottom - spanTop) * 0.45);
+  if (headH > capH) headH = capH;
+  if (tailH > capH) tailH = capH;
+
   // body between the head/tail sprites
   const bodyTop = spanTop + tailH;
   const bodyBottom = spanBottom - headH;
   if (bodyBottom - bodyTop > 0.5) {
-    if (body?.img) {
+    if (body && body.img) {
       const natAspect = body.img.naturalHeight / body.img.naturalWidth;
       const tileH = cw * natAspect;
       if (tileH >= bodyBottom - bodyTop) {

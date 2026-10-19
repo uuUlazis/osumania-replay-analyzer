@@ -12,6 +12,8 @@ export default function ReplayPreview() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [skin, setSkin] = useState<ManiaSkin | null>(null);
   const keyCount = snap.beatmap?.keyCount ?? 4;
+  // 判定数据源跟随本次分析使用的规则档 (snap.analysis 可为 null → 回退 V1)
+  const judgeVersion = snap.analysis?.rulesProfile === "v2" ? "v2" : "v1";
 
   // visible time window from scroll speed (notes spawn above the field)
   const windowMs = useMemo(
@@ -31,23 +33,44 @@ export default function ReplayPreview() {
       });
     }
     return () => { cancelled = true; };
-  }, [sid, keyCount]);
+  }, [sid, keyCount, player.skinRev]);
 
-  // visible objects window: binary search on sorted objects
+  // Longest hold span in the map: LNs starting this long before the preview
+  // time can still be on screen (their tail has not passed the line yet).
+  const maxHoldMs = useMemo(() => {
+    let m = 0;
+    for (const o of snap.objects) {
+      if (o.endTimeMs) {
+        const d = o.endTimeMs - o.startTimeMs;
+        if (d > m) m = d;
+      }
+    }
+    return m;
+  }, [snap.objects]);
+
+  // visible objects window: binary search on the START-time-sorted objects.
+  // The previous version binary-searched endTimeMs, but the array is sorted
+  // by startTimeMs — with long holds the end times are not monotonic, so the
+  // search could jump past a hold that was still visible and make whole LNs
+  // vanish frame-to-frame while they were still mid-screen.
   const visible = useMemo(() => {
     const t = player.previewTimeMs;
     const objs = snap.objects;
+    if (!objs.length) return [];
+    const lead = 800 + maxHoldMs;
     let lo = 0, hi = objs.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      const endT = objs[mid].endTimeMs ?? objs[mid].startTimeMs;
-      if (endT < t - 800) lo = mid + 1; else hi = mid;
+      if (objs[mid].startTimeMs < t - lead) lo = mid + 1; else hi = mid;
     }
     const out = [];
-    for (let i = lo; i < objs.length && objs[i].startTimeMs - t <= windowMs; ++i)
-      out.push(objs[i]);
+    for (let i = lo; i < objs.length && objs[i].startTimeMs - t <= windowMs; ++i) {
+      const o = objs[i];
+      const endT = o.endTimeMs ?? o.startTimeMs;
+      if (endT - t >= -800) out.push(o);
+    }
     return out;
-  }, [snap.objects, player.previewTimeMs, windowMs]);
+  }, [snap.objects, player.previewTimeMs, windowMs, maxHoldMs]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -83,7 +106,7 @@ export default function ReplayPreview() {
     // 判定规则 V2 draws the ScoreV2 match (falls back to V1 events when the
     // session predates the second pass).
     const events =
-      player.judgeVersion === "v2" && snap.eventsV2.length
+      judgeVersion === "v2" && snap.eventsV2.length
         ? snap.eventsV2
         : snap.events;
     drawPlayfield(ctx, rect.width, rect.height, {
@@ -95,9 +118,9 @@ export default function ReplayPreview() {
       scrollSpeed: player.scrollSpeed,
       windowMs,
       showInputJudges: player.showInputJudges,
-      judgeVersion: player.judgeVersion,
+      judgeVersion,
     });
-  }, [visible, snap.events, snap.eventsV2, snap.frames, player.previewTimeMs, keyCount, player.scrollSpeed, windowMs, snap.sessionId, skin, player.showInputJudges, player.judgeVersion]);
+  }, [visible, snap.events, snap.eventsV2, snap.frames, player.previewTimeMs, keyCount, player.scrollSpeed, windowMs, snap.sessionId, skin, player.showInputJudges, judgeVersion]);
 
   return (
     <canvas ref={canvasRef} className="preview-canvas" />

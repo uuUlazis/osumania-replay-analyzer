@@ -63,6 +63,10 @@ struct SegmentAnalysis {
     OffsetStats offsets;
     double accuracyV1 = 0.0;
     double accuracyV2 = 0.0;
+    // Stable per-object view (see GlobalAnalysis::stableCounts).
+    JudgementCounts stableCounts;
+    double stableAccuracyV1 = 0.0;
+    double stableAccuracyV2 = 0.0;
     std::vector<ColumnStats> perColumn;
 };
 
@@ -73,6 +77,12 @@ struct GlobalAnalysis {
     OffsetStats tailOffsets;        // hold-tail offsets (non-miss, early only)
     double accuracyV1 = 0.0;
     double accuracyV2 = 0.0;
+    // Stable scoring view: ONE judgement per object (an LN is a single unit —
+    // the combined V1 judgement). osu!stable .osr counters use this model;
+    // lazer records LN heads and tails separately (= counts above).
+    JudgementCounts stableCounts;
+    double stableAccuracyV1 = 0.0;
+    double stableAccuracyV2 = 0.0;
     Histogram histogram;
     std::vector<ColumnStats> perColumn;
     std::vector<JudgementBreakdownItem> breakdown;

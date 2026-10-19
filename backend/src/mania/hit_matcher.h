@@ -44,6 +44,13 @@ struct MatchOptions {
     // ScoreV2 rules: LN head late window ok*1.5, tail judged independently on
     // |endDiff|/1.5 (release beyond ok*1.5 late = tail Miss).
     bool scoreV2 = false;
+    // 判定窗 × 速率 (acc-semantics §0.2): DT/NC 1.5, HT 0.75, NM 1.0.
+    // .osr 帧时基 = 真实时间, 比较保持原样, 只放窗 (§9 红线: 不对帧/边沿乘速率).
+    double rate = 1.0;
+    // RD 列置换: seed 来自 .osr 尾部 RNG seed 帧 ("-12345|x|y|seed"). 开启后
+    // 物件列先经该 seed 复原的置换表映射, 再走 mirrorColumns (先随机后镜像).
+    bool randomMod = false;
+    unsigned randomSeed = 0;
 };
 
 struct MatchResult {
