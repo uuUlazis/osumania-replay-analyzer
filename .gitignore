@@ -15,3 +15,8 @@ debug.log
 # local test data (personal replays / audio / skins - not for distribution)
 test/
 agent.md
+
+# local dev docs / exploration artifacts (build-minimal repo, keep local only)
+HANDOFF.md
+docs/
+archive/
