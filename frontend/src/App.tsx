@@ -21,6 +21,7 @@ export default function App() {
   >(null);
   const [browserOpen, setBrowserOpen] = useState(false);
   const [skinFolder, setSkinFolder] = useState<string | undefined>();
+  const [debugLog, setDebugLog] = useState(false);
   const [resolvedPaths, setResolvedPaths] = useState<{
     replayPath: string;
     beatmapPath: string;
@@ -36,6 +37,8 @@ export default function App() {
           playerStore.setVolume(s.volume);
         if (s && typeof s.showInputJudges === "boolean")
           playerStore.setShowInputJudges(s.showInputJudges);
+        if (s && typeof s.debugLog === "boolean")
+          setDebugLog(s.debugLog);
       })
       .catch(() => {});
   }, []);
@@ -135,11 +138,24 @@ export default function App() {
 
   const ready = snap.sessionId !== null;
 
+  // 调试日志开关: 状态持久化到 last-state, 后端写 <exe 目录>/debug/debug.log
+  const toggleDebugLog = (v: boolean) => {
+    setDebugLog(v);
+    api.saveLastState({ debugLog: v }).catch(() => {});
+  };
+
   return (
     <Layout title="osu!mania Replay Analyzer">
       <div className="topbar">
         <h1>osu!mania Replay Analyzer</h1>
         <div className="spacer" />
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}
+          title="开启后在 exe 同级 debug/debug.log 记录会话/错误/SR 计算等诊断日志"
+        >
+          <input type="checkbox" checked={debugLog} onChange={(e) => toggleDebugLog(e.target.checked)} />
+          输出调试日志
+        </label>
       </div>
       <div className="main">
         <div className="left-panel">

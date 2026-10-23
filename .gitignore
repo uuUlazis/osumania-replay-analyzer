@@ -8,6 +8,7 @@ frontend/tsconfig.tsbuildinfo
 webview-profile/
 *.state
 debug.log
+debug/
 # toolchain artifacts
 *.obj
 *.exe
@@ -15,6 +16,8 @@ debug.log
 # local test data (personal replays / audio / skins - not for distribution)
 test/
 agent.md
+# local version snapshots (frozen build-minimal trees; git set == snapshot set)
+versions/
 
 # local dev docs / exploration artifacts (build-minimal repo, keep local only)
 HANDOFF.md

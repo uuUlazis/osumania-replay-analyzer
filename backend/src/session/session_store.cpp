@@ -1,5 +1,7 @@
 #include "session/session_store.h"
 
+#include "util/debug_log.h"
+
 #include <chrono>
 #include <cstdio>
 #include <random>
@@ -29,9 +31,26 @@ std::string SessionStore::create(ReplaySession session) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string id = makeId();
     session.id = id;
+    session.insertSeq = ++insertSeq_;
     sessions_[id] = std::move(session);
-    // Keep only the most recent 8 sessions alive.
-    while (sessions_.size() > 8) sessions_.erase(sessions_.begin());
+    // Keep only the 8 newest sessions alive. Evict strictly by creation
+    // order: std::map iterates in id-lexicographic order, so the old
+    // sessions_.begin() eviction removed a RANDOM session (uuid order),
+    // sometimes the one the frontend was actively polling - surfaced as
+    // random SESSION_NOT_FOUND errors (v0.1.1 fix). The active session
+    // is always the newest and can never be evicted now.
+    while (sessions_.size() > 8) {
+        auto oldest = sessions_.begin();
+        for (auto it = sessions_.begin(); it != sessions_.end(); ++it)
+            if (it->second.insertSeq < oldest->second.insertSeq)
+                oldest = it;
+        debuglog::log("session evict id=" + oldest->first + " title=" +
+                      oldest->second.beatmap.title);
+        sessions_.erase(oldest);
+    }
+    debuglog::log("session create id=" + id + " seq=" +
+                  std::to_string(sessions_[id].insertSeq) + " title=" +
+                  sessions_[id].beatmap.title);
     return id;
 }
 

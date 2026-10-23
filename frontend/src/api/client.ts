@@ -128,8 +128,10 @@ export const api = {
       scores?: string; dataR?: string; songs?: string; skin?: string;
       volume?: number;
       showInputJudges?: boolean;
+      debugLog?: boolean;
+      scoreColWidths?: number[];
     }>("GET", "/api/last-state"),
-  saveLastState: (patch: Record<string, string | number | boolean | null>) =>
+  saveLastState: (patch: Record<string, string | number | boolean | null | number[]>) =>
     call("POST", "/api/last-state", patch),
   scoresBrowse: (mode: number, force?: boolean) =>
     call<{

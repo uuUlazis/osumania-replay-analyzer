@@ -8,6 +8,24 @@
 #include "mania/analysis.h"
 #include "mania/hit_matcher.h"
 #include "mania/judgement.h"
+// SR 算法模块 (officialSR / SrrStarRating, 独立并行产出)。__has_include 让
+// 本接线在其落地前也可编译: 缺头文件时全部 SR 存 -1, pp/局部SR 显示 "—"。
+#if __has_include("mania/official_sr.h")
+#include "mania/official_sr.h"
+#define MRA_HAS_OFFICIAL_SR 1
+#else
+#define MRA_HAS_OFFICIAL_SR 0
+#endif
+#if __has_include("mania/srr_sr.h")
+#include "mania/srr_sr.h"
+#define MRA_HAS_SRR_SR 1
+#else
+#define MRA_HAS_SRR_SR 0
+#endif
+#include "util/debug_log.h"
+
+#include <chrono>
+
 #include "replay/osr_reader.h"
 #include "replay/replay_decoder.h"
 #include "replay/replay_frames.h"
@@ -23,6 +41,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -184,9 +203,12 @@ json errorResponse(const std::string& code, const std::string& message,
                                {"details", details}}}};
 }
 
-void sendError(httplib::Response& res, int httpStatus,
-               const std::string& code, const std::string& message,
+void sendError(const httplib::Request& req, httplib::Response& res,
+               int httpStatus, const std::string& code,
+               const std::string& message,
                const json& details = json::object()) {
+    debuglog::log("api error " + std::to_string(httpStatus) + " " + code +
+                  " " + req.method + " " + req.path + ": " + message);
     res.status = httpStatus;
     res.set_content(errorResponse(code, message, details).dump(), "application/json");
 }
@@ -216,6 +238,15 @@ json countsJson(const JudgementCounts& c) {
     return json{{"perfect", c.perfect}, {"great", c.great}, {"good", c.good},
                 {"ok", c.ok}, {"meh", c.meh}, {"miss", c.miss}};
 }
+
+// 判定窗两套取值 (matcher 实际上报的 w / w2), 用于核对 mod 因子是否生效。
+json windowsJson(const ManiaWindows& w) {
+    return json{{"perfect", w.perfect}, {"great", w.great}, {"good", w.good},
+                {"ok", w.ok}, {"meh", w.meh}, {"miss", w.miss}};
+}
+
+// acc 保留 5 位小数 (既有 accuracy 字段的既有精度, 保持输出逐位不变)。
+double round5(double v) { return std::round(v * 100000.0) / 100000.0; }
 
 json offsetStatsJson(const OffsetStats& s, int digits = 2) {
     auto r = [](double v, int d) {
@@ -286,6 +317,12 @@ bool readOsuStringAt(const std::vector<uint8_t>& buf, size_t& pos,
 // Win32 FILETIME ticks (1601-01-01 epoch) used in Data\\r .osr file names.
 constexpr int64_t kDotNetToFileTimeTicks = 504911232000000000LL;
 
+// Browse response cache schema. Bumped when the row schema changes so the
+// persisted (L2) and in-memory (L1) browse caches built by older builds are
+// invalidated on the first request after an upgrade (the scores.db MD5 key
+// alone would keep serving rows without the new fields).
+constexpr int kBrowseResponseCacheVersion = 5;
+
 // Extracts the value of the first "Key: value" line with an exact key match.
 std::string iniValue(const std::string& text, const std::string& key) {
     size_t pos = 0;
@@ -304,6 +341,155 @@ std::string iniValue(const std::string& text, const std::string& key) {
         pos = eol + 1;
     }
     return "";
+}
+
+// ---- SR / pp wiring (docs/pp-sr-notes.md §2 公式, §3.8 mods 档位) ----
+// 不可算一律 -1 (前端显示 "—")。
+constexpr double kSrNotComputable = -1.0;
+
+double saneSr(double v) {
+    return (std::isfinite(v) && v >= 0.0) ? v : kSrNotComputable;
+}
+
+// 官方 pp (lazer 移植, 常数见 pp-sr-notes §2.2/§2.3):
+//   pp = 8.0 * max(SR-0.15, 0.05)^2.2 * max(0, 5*acc-4)
+//        * (1 + 0.1*min(1, hits/1500)) * mult          mult: NF ×0.75, EZ ×0.50
+// acc 用官方判定权重 Perfect 320 / Great 300 / Good 200 / Ok 100 / Meh 50
+// (stable .osr 映射: Geki→Perfect, 300→Great, Katu→Good, 100→Ok, 50→Meh),
+// hits 含 Miss。SR < 0 (无谱面/不可算) → -1。
+double officialPpFromCounts(double sr, int64_t perfect, int64_t great,
+                            int64_t good, int64_t ok, int64_t meh,
+                            int64_t miss, int64_t mods) {
+    if (sr < 0) return -1.0;
+    const double totalHits = static_cast<double>(perfect) + great + good +
+                             ok + meh + miss;
+    if (totalHits <= 0) return -1.0;
+    const double acc =
+        (320.0 * perfect + 300.0 * great + 200.0 * good + 100.0 * ok +
+         50.0 * meh) / (totalHits * 320.0);
+    double mult = 1.0;
+    if (mods & kModNoFail) mult *= 0.75;
+    if (mods & kModEasy) mult *= 0.50;
+    return 8.0 * std::pow(std::max(sr - 0.15, 0.05), 2.2) *
+           std::max(0.0, 5.0 * acc - 4.0) *
+           (1.0 + 0.1 * std::min(1.0, totalHits / 1500.0)) * mult;
+}
+
+// 与 loadReplaySession 的判定 rate 同源 (§3.8: 只有 DT/NC/HT 改 rate):
+// DT/NC → 1.5, HT → 0.75, 其余 → 1.0。summary 的 rate/windows 上报也用它,
+// 未编译 SR 模块时同样需要有定义。
+double rateForMods(int64_t mods) {
+    if (mods & (kModDoubleTime | kModNightcore)) return 1.5;
+    if (mods & kModHalfTime) return 0.75;
+    return 1.0;
+}
+
+#if MRA_HAS_OFFICIAL_SR || MRA_HAS_SRR_SR
+// Beatmap 物件 → SR 模块的 note 列表 (column, headMs, tailMs);
+// rice (非 LN) 约定 tailMs < 0。
+std::vector<SrNote> srNotesFromBeatmap(const OsuBeatmap& beatmap) {
+    std::vector<SrNote> notes;
+    notes.reserve(beatmap.objects.size());
+    for (const ManiaHitObject& o : beatmap.objects) {
+        SrNote n;
+        n.column = o.column;
+        n.headMs = static_cast<int>(o.startTimeMs);
+        n.tailMs = (o.type == ManiaObjectType::Hold && o.endTimeMs)
+                       ? static_cast<int>(*o.endTimeMs)
+                       : -1;
+        notes.push_back(n);
+    }
+    return notes;
+}
+#endif
+
+#if MRA_HAS_OFFICIAL_SR
+// Songs 索引行的 official SR 档位选择 (只读缓存字段, 不重算 SR)。
+double officialSrForMods(const SongsBeatmapMeta& meta, int64_t mods) {
+    if (mods & (kModDoubleTime | kModNightcore)) return meta.officialSrDt;
+    if (mods & kModHalfTime) return meta.officialSrHt;
+    return meta.officialSrBase;
+}
+#endif
+
+// Songs 索引扫描的 SR 计算: 完整解析 .osu 后算 officialSR base/DT(1.5)/
+// HT(0.75) 与 SRR 全局 SR (OD 用谱面 OD)。只在扫描到新增/变更文件时运行;
+// 未变更文件由 per-file 缓存与 sidecar 直接回放这些字段。非 mania /
+// K>10 / notes<20 / 解析失败一律存 -1。
+void computeSrMeta(const std::string& text, SongsBeatmapMeta& meta) {
+    meta.officialSrBase = kSrNotComputable;
+    meta.officialSrDt = kSrNotComputable;
+    meta.officialSrHt = kSrNotComputable;
+    meta.srrSr = kSrNotComputable;
+    meta.bpm = kSrNotComputable;
+    meta.lengthMs = -1;
+    OsuParseResult parsed = parseOsu(text);
+    if (!parsed.ok || !parsed.beatmap.isMania()) return;
+    const OsuBeatmap& beatmap = parsed.beatmap;
+    if (beatmap.keyCount <= 0 || beatmap.keyCount > 10) return;
+    if (beatmap.objects.size() < 20) return;
+#if MRA_HAS_OFFICIAL_SR || MRA_HAS_SRR_SR
+    const std::vector<SrNote> notes = srNotesFromBeatmap(beatmap);
+#endif
+    try {
+#if MRA_HAS_OFFICIAL_SR
+        meta.officialSrBase =
+            saneSr(OfficialStarRating(beatmap.keyCount, notes, 1.0));
+        meta.officialSrDt =
+            saneSr(OfficialStarRating(beatmap.keyCount, notes, 1.5));
+        meta.officialSrHt =
+            saneSr(OfficialStarRating(beatmap.keyCount, notes, 0.75));
+#endif
+#if MRA_HAS_SRR_SR
+        meta.srrSr = saneSr(SrrStarRating(beatmap.keyCount,
+                                          beatmap.overallDifficulty, notes));
+#endif
+    } catch (...) {
+        // sunny SR / official SR 在极端谱面上抛错: 按 不可算 处理, 不让
+        // 扫描线程带异常逃逸。
+        meta.officialSrBase = kSrNotComputable;
+        meta.officialSrDt = kSrNotComputable;
+        meta.officialSrHt = kSrNotComputable;
+        meta.srrSr = kSrNotComputable;
+        meta.bpm = kSrNotComputable;
+        meta.lengthMs = -1;
+    }
+    // BPM: 驻留时长最长的无继承 timing 段; Length: 物件跨度 (首头→末尾,
+    // LN 尾计入)。多 BPM 图取主体段, 单值可排序可筛选。
+    {
+        double minHead = 0, maxEnd = 0;
+        for (const auto& o : beatmap.objects) {
+            const double end = (o.type == ManiaObjectType::Hold && o.endTimeMs)
+                                   ? static_cast<double>(*o.endTimeMs)
+                                   : static_cast<double>(o.startTimeMs);
+            if (minHead == 0 || o.startTimeMs < minHead)
+                minHead = static_cast<double>(o.startTimeMs);
+            maxEnd = std::max(maxEnd, end);
+        }
+        if (!beatmap.objects.empty() && maxEnd > minHead)
+            meta.lengthMs = static_cast<int64_t>(maxEnd - minHead);
+        const auto& tps = beatmap.timingPoints;
+        std::map<double, double> dwell;  // bpm -> dwell ms
+        for (size_t i = 0; i < tps.size(); ++i) {
+            if (!tps[i].uninherited || tps[i].beatLength <= 0) continue;
+            double segEnd = (i + 1 < tps.size())
+                                ? tps[i + 1].timeMs
+                                : std::max(maxEnd, tps[i].timeMs + 1);
+            if (segEnd <= tps[i].timeMs) segEnd = tps[i].timeMs + 1;
+            dwell[60000.0 / tps[i].beatLength] += segEnd - tps[i].timeMs;
+        }
+        double bestDwell = -1;
+        for (const auto& [bpmVal, d] : dwell)
+            if (d > bestDwell) { bestDwell = d; meta.bpm = saneSr(bpmVal); }
+    }
+    if (debuglog::enabled())
+        debuglog::log("sr computed " + meta.path + " official=" +
+                      std::to_string(meta.officialSrBase) + "/" +
+                      std::to_string(meta.officialSrDt) + "/" +
+                      std::to_string(meta.officialSrHt) + " srr=" +
+                      std::to_string(meta.srrSr) + " bpm=" +
+                      std::to_string(meta.bpm) + " lenMs=" +
+                      std::to_string(meta.lengthMs));
 }
 
 }  // namespace
@@ -568,7 +754,13 @@ void ApiServer::refreshScoreStoresLocked(std::string& err) {
                                       {"creator", e.meta.creator},
                                       {"audioFilename", e.meta.audioFilename},
                                       {"version", e.meta.version},
-                                      {"keyCount", e.meta.keyCount}}}};
+                                      {"keyCount", e.meta.keyCount},
+                                      {"officialSrBase", e.meta.officialSrBase},
+                                      {"officialSrDt", e.meta.officialSrDt},
+                                      {"officialSrHt", e.meta.officialSrHt},
+                                      {"srrSr", e.meta.srrSr},
+                                      {"bpm", e.meta.bpm},
+                                      {"lengthMs", e.meta.lengthMs}}}};
         };
         auto songsEntryFromJson = [](const json& item, SongsFileEntry& e,
                                      std::string& pUtf8) {
@@ -586,7 +778,13 @@ void ApiServer::refreshScoreStoresLocked(std::string& err) {
                     !meta.at("creator").is_string() ||
                     !meta.at("audioFilename").is_string() ||
                     !meta.at("version").is_string() ||
-                    !meta.at("keyCount").is_string())
+                    !meta.at("keyCount").is_string() ||
+                    !meta.at("officialSrBase").is_number() ||
+                    !meta.at("officialSrDt").is_number() ||
+                    !meta.at("officialSrHt").is_number() ||
+                    !meta.at("srrSr").is_number() ||
+                    !meta.at("bpm").is_number() ||
+                    !meta.at("lengthMs").is_number())
                     return false;
                 pUtf8 = item.at("p").get<std::string>();
                 if (pUtf8.empty()) return false;
@@ -603,6 +801,13 @@ void ApiServer::refreshScoreStoresLocked(std::string& err) {
                     meta.at("audioFilename").get<std::string>();
                 e.meta.version = meta.at("version").get<std::string>();
                 e.meta.keyCount = meta.at("keyCount").get<std::string>();
+                e.meta.officialSrBase =
+                    meta.at("officialSrBase").get<double>();
+                e.meta.officialSrDt = meta.at("officialSrDt").get<double>();
+                e.meta.officialSrHt = meta.at("officialSrHt").get<double>();
+                e.meta.srrSr = meta.at("srrSr").get<double>();
+                e.meta.bpm = meta.at("bpm").get<double>();
+                e.meta.lengthMs = meta.at("lengthMs").get<int64_t>();
                 return true;
             } catch (...) {
                 return false;
@@ -622,7 +827,7 @@ void ApiServer::refreshScoreStoresLocked(std::string& err) {
         if (dirty && !songsIndexBuilt_) {
             json env = readJsonSidecar(songsIndexCachePath());
             try {
-                if (env.is_object() && env.value("version", 0) == 1 &&
+                if (env.is_object() && env.value("version", 0) == 3 &&
                     env.value("folder", std::string{}) == songsFolder_ &&
                     env.at("dirStamp").is_number_integer() &&
                     env.at("entries").is_array()) {
@@ -702,6 +907,9 @@ void ApiServer::refreshScoreStoresLocked(std::string& err) {
                     e.meta.audioFilename = iniValue(text, "AudioFilename");
                     e.meta.version = iniValue(text, "Version");
                     e.meta.keyCount = iniValue(text, "CircleSize");
+                    // SR 索引 (sidecar v2): officialSR base/DT/HT + SRR 全局
+                    // SR。只对新增/变更文件运行; 不可算存 -1。
+                    computeSrMeta(text, e.meta);
                 }
                 fresh.emplace(it->path(), std::move(e));
             }
@@ -721,7 +929,7 @@ void ApiServer::refreshScoreStoresLocked(std::string& err) {
                 for (const auto& kv : songsFileCache_)
                     entries.push_back(songsEntryToJson(kv.first, kv.second));
                 writeJsonSidecar(songsIndexCachePath(),
-                                 json{{"version", 1},
+                                 json{{"version", 3},
                                       {"folder", songsFolder_},
                                       {"dirStamp",
                                        static_cast<int64_t>(
@@ -783,7 +991,15 @@ LoadOutcome loadReplaySession(const std::string& replayPath,
     if (keyCount <= 0) keyCount = beatmap.keyCount;
     MatchOptions matchOptions;
     matchOptions.windows = ManiaWindows::fromOD(beatmap.overallDifficulty);
+    // 源码忠实引擎的窗口由 ApplyDifficultySettings(OD, ActiveMods) 现算：
+    // 传原始 OD（double，源里先 conv.r4 成 float）与原生 mania 谱标志。
+    matchOptions.od = beatmap.overallDifficulty;
+    matchOptions.nativeManiaBeatmap = beatmap.isMania();
     matchOptions.mirrorColumns = (osr.header.mods & kModMirror) != 0;
+    // .osr mod 位原样进 matcher: MRA_RE_WIN 的窗口因子 (HR÷1.4 / EZ×1.4 再
+    // DT/NC×1.5 / HT×0.75) 需要 HR/EZ/DT/HT 位才完整; rate 只承载 DT/HT。
+    // 无 mod ⇒ 因子 1.0, 判定与改动前逐位一致。
+    matchOptions.mods = osr.header.mods;
     // 判定窗 × 速率 (acc-semantics §0.2): DT/NC 1.5, HT 0.75 (NC 优先级与 DT
     // 同值). 只乘窗, 不动帧时基.
     if (osr.header.mods & (kModDoubleTime | kModNightcore))
@@ -803,6 +1019,13 @@ LoadOutcome loadReplaySession(const std::string& replayPath,
             }
         }
     }
+    // I-6 (MRA_RE_EVENKEY) 已在源码忠实重写后钉死为 OFF (不再作为可选补偿)。
+    // 该帧位旋转是旧分析管线 ("bit c == 解析列 c") 的补偿; 源码忠实引擎
+    // (mania/source_engine.cpp: applyReplayFrame 的 GetManiaKeyMask 逆向 +
+    // remapManiaColumn 的物件侧同源位移) 已内建同一语义, 外部旋转 ρ 必须为 0 ——
+    // 再叠加会把 6K/8K 的 Mirror/RD 局转到错列。
+    // 回归网: test_replay_lanes engineCompositionIdentity / engineGateMatchesModule。
+    // 旋转原语保留在 replay/replay_frames.cpp 仅供测试与考古。
     MatchResult match =
         matchReplayToObjects(beatmap.objects, keyCount, frames, matchOptions);
 
@@ -875,6 +1098,12 @@ LoadOutcome loadReplaySession(const std::string& replayPath,
 }
 
 void ApiServer::registerRoutes(httplib::Server& svr) {
+    // Restore the debug-log toggle the frontend persisted (checkbox).
+    {
+        json st = readJsonSidecar(lastStatePath());
+        if (st.is_object() && st.value("debugLog", false))
+            debuglog::setEnabled(true);
+    }
     // ---- App ----
     svr.Get("/api/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(okResponse(json{{"status", "up"}}).dump(),
@@ -895,19 +1124,24 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON", "request body is not valid JSON");
+            return sendError(req, res, 400, "INVALID_JSON", "request body is not valid JSON");
         }
         std::string replayPath = body.value("replayPath", "");
         std::string beatmapPath = body.value("beatmapPath", "");
         std::string audioPath = body.value("audioPath", "");
         std::string skinFolder = body.value("skinFolder", "");
         if (replayPath.empty() || beatmapPath.empty())
-            return sendError(res, 400, "MISSING_PATH",
+            return sendError(req, res, 400, "MISSING_PATH",
                              "replayPath and beatmapPath are required");
+        const auto loadT0 = std::chrono::steady_clock::now();
         LoadOutcome out =
             loadReplaySession(replayPath, beatmapPath, audioPath, skinFolder);
+        debuglog::log("load manual " + std::to_string(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - loadT0).count()) +
+            "ms ok=" + (out.ok ? "1" : "0"));
         if (!out.ok)
-            return sendError(res, 422, out.errorCode, out.message);
+            return sendError(req, res, 422, out.errorCode, out.message);
         res.set_content(
             okResponse(json{{"sessionId", out.sessionId}}).dump(),
             "application/json");
@@ -918,7 +1152,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         const OsrHeader& h = s.replay.header;
         res.set_content(okResponse(json{
             {"player", h.playerName},
@@ -945,7 +1179,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         int64_t from = req.has_param("from") ? std::stoll(req.get_param_value("from")) : 0;
         int64_t to = req.has_param("to")
                          ? std::stoll(req.get_param_value("to"))
@@ -984,7 +1218,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         const OsuBeatmap& b = s.beatmap;
         res.set_content(okResponse(json{
             {"title", b.title}, {"artist", b.artist}, {"creator", b.creator},
@@ -1004,7 +1238,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         int64_t from = req.has_param("from") ? std::stoll(req.get_param_value("from")) : 0;
         int64_t to = req.has_param("to")
                          ? std::stoll(req.get_param_value("to"))
@@ -1031,7 +1265,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         const GlobalAnalysis& g = s.analysis;
         json hist = json::array();
         for (size_t i = 0; i < g.histogram.buckets.size(); ++i) {
@@ -1067,15 +1301,60 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                                    {"pass", countsMatch}});
         consistency.push_back(json{{"check", "replayEndedNormally"},
                                    {"pass", s.match.replayEndedNormally}});
+        // Official pp (docs/pp-sr-notes §2): official SR 档位按会话 mods 的
+        // rate 选 (与 loadReplaySession 的判定 rate 同源: DT/NC 1.5, HT
+        // 0.75), counts 用上面 .osr 标定的匹配计数 (shownCounts, 即响应里
+        // 的 "counts"), acc 走官方判定权重。SR 不可算 → pp = -1。
+        const int64_t sessionMods = static_cast<int64_t>(s.replay.header.mods);
+        double summarySr = kSrNotComputable;
+#if MRA_HAS_OFFICIAL_SR
+        if (s.beatmap.isMania() && s.beatmap.keyCount > 0 &&
+            s.beatmap.keyCount <= 10 && s.beatmap.objects.size() >= 20) {
+            const std::vector<SrNote> notes = srNotesFromBeatmap(s.beatmap);
+            try {
+                summarySr = saneSr(OfficialStarRating(
+                    s.beatmap.keyCount, notes, rateForMods(sessionMods)));
+            } catch (...) {
+                summarySr = kSrNotComputable;
+            }
+        }
+#endif
+        const double summaryPp = officialPpFromCounts(
+            summarySr, shownCounts.perfect, shownCounts.great,
+            shownCounts.good, shownCounts.ok, shownCounts.meh,
+            shownCounts.miss, sessionMods);
+        // 当前 profile 实际分析的那个 match pass: 判定窗、整数化开关都取自它,
+        // 便于前端/脚本核对 HR/EZ/DT/HT 是否真的进了 matcher。
+        const MatchResult& rulesMatch = s.rulesScoreV2 ? s.matchV2 : s.match;
         res.set_content(okResponse(json{
-            {"countMode", stableMode ? "stable" : "lazer"},
+            {"countMode", stableMode ? "scorev1" : "scorev2"},
             {"rulesProfile", s.rulesScoreV2 ? "v2" : "v1"},
             {"counts", countsJson(shownCounts)},
             {"headCounts", countsJson(g.headCounts)},
-            {"accuracy", json{{"scoreV1", std::round((stableMode ? g.stableAccuracyV1
-                                                                  : g.accuracyV1) * 100000) / 100000},
-                              {"scoreV2", std::round((stableMode ? g.stableAccuracyV2
-                                                                  : g.accuracyV2) * 100000) / 100000}}},
+            // 双计数口径 (向后兼容的新增字段): countsStable = 每物件一次
+            // (LN 单计, osu!stable .osr 口径); countsPairwise = LN 头尾各计
+            // (lazer/ScoreV2 口径)。上面的 counts 是二者中「本局实际口径」。
+            {"countsStable", countsJson(g.stableCounts)},
+            {"countsPairwise", countsJson(g.counts)},
+            {"accuracy", json{{"scoreV1", round5(stableMode ? g.stableAccuracyV1
+                                                            : g.accuracyV1)},
+                              {"scoreV2", round5(stableMode ? g.stableAccuracyV2
+                                                            : g.accuracyV2)}}},
+            // 双口径 × 双权重: 前端可并列 V1(legacy 300) / V2(305) 两个 acc,
+            // 并标出当前 profile 用的是哪一组。
+            {"accuracyDetail", json{
+                {"stable", json{{"scoreV1", round5(g.stableAccuracyV1)},
+                                {"scoreV2", round5(g.stableAccuracyV2)}}},
+                {"pairwise", json{{"scoreV1", round5(g.accuracyV1)},
+                                  {"scoreV2", round5(g.accuracyV2)}}}}},
+            // mods → 窗口链路的结果: rate 只承载 DT/HT, windows 是 MRA_RE_WIN
+            // 整数化 + HR/EZ/DT/HT 因子之后的最终窗口 (判定实际使用的值)。
+            {"mods", sessionMods},
+            {"rate", rateForMods(sessionMods)},
+            {"windows", json{
+                {"integral", rulesMatch.integralWindows},
+                {"v1", windowsJson(rulesMatch.windowsV1)},
+                {"v2", windowsJson(rulesMatch.windowsV2)}}},
             {"offsets", offsetStatsJson(g.offsets)},
             {"tailOffsets", offsetStatsJson(g.tailOffsets)},
             {"histogram", hist},
@@ -1092,6 +1371,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             {"unmatchedObjects", s.match.unmatchedObjects},
             {"firstEventTimeMs", g.firstEventTimeMs},
             {"lastEventTimeMs", g.lastEventTimeMs},
+            {"pp", summaryPp},
             {"osrDeclared", json{
                 {"counts", json{{"n300", h.count300}, {"n100", h.count100},
                                 {"n50", h.count50}, {"gekki", h.countGeki},
@@ -1106,7 +1386,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         int64_t from = req.has_param("from") ? std::stoll(req.get_param_value("from")) : INT64_MIN;
         int64_t to = req.has_param("to") ? std::stoll(req.get_param_value("to")) : INT64_MAX;
         size_t limit = req.has_param("limit")
@@ -1150,9 +1430,9 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         if (!s.audioPath || s.audioPath->empty())
-            return sendError(res, 404, "NO_AUDIO", "session has no audio");
+            return sendError(req, res, 404, "NO_AUDIO", "session has no audio");
         std::string lower = *s.audioPath;
         std::transform(lower.begin(), lower.end(), lower.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1176,12 +1456,12 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             const std::filesystem::path file = mra::pathFromUtf8(*s.audioPath);
             (void)std::filesystem::file_size(file, fsEc);
             if (fsEc)
-                return sendError(res, 422, "AUDIO_READ_FAILED", fsEc.message());
+                return sendError(req, res, 422, "AUDIO_READ_FAILED", fsEc.message());
             res.set_header("Accept-Ranges", "bytes");
         }
         std::vector<uint8_t> bytes;
         if (auto err = readFileBytes(*s.audioPath, bytes))
-            return sendError(res, 422, "AUDIO_READ_FAILED", *err);
+            return sendError(req, res, 422, "AUDIO_READ_FAILED", *err);
         res.set_content(std::string(bytes.begin(), bytes.end()), mime);
     });
 
@@ -1190,7 +1470,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         json arr = json::array();
         const MatchResult& rulesMatch = s.rulesScoreV2 ? s.matchV2 : s.match;
         for (const auto& h : rulesMatch.holds) {
@@ -1223,20 +1503,20 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
              [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         json body;
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON", "request body is not valid JSON");
+            return sendError(req, res, 400, "INVALID_JSON", "request body is not valid JSON");
         }
         if (!body.contains("startMs") || !body.contains("endMs"))
-            return sendError(res, 400, "MISSING_RANGE",
+            return sendError(req, res, 400, "MISSING_RANGE",
                              "startMs and endMs are required");
         int64_t startMs = body["startMs"].get<int64_t>();
         int64_t endMs = body["endMs"].get<int64_t>();
         if (endMs <= startMs)
-            return sendError(res, 400, "INVALID_RANGE", "endMs must be > startMs");
+            return sendError(req, res, 400, "INVALID_RANGE", "endMs must be > startMs");
         const MatchResult& rulesMatch = s.rulesScoreV2 ? s.matchV2 : s.match;
         SegmentAnalysis seg =
             analyzeSegment(rulesMatch, s.keyCount, startMs, endMs);
@@ -1245,15 +1525,60 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             stableMode ? seg.stableCounts : seg.counts;
         const double accV1 = stableMode ? seg.stableAccuracyV1 : seg.accuracyV1;
         const double accV2 = stableMode ? seg.stableAccuracyV2 : seg.accuracyV2;
+        // 局部 SRR SR: beatmap 物件 (column, headMs, tailMs<0 rice) 调
+        // SrrStarRatingLocal(startMs, endMs); 不可算 -1。
+        double segSrrSr = kSrNotComputable;
+#if MRA_HAS_SRR_SR
+        try {
+            segSrrSr = saneSr(SrrStarRatingLocal(
+                s.beatmap.keyCount, s.beatmap.overallDifficulty,
+                srNotesFromBeatmap(s.beatmap), static_cast<int>(startMs),
+                static_cast<int>(endMs)));
+        } catch (...) {
+            segSrrSr = kSrNotComputable;
+        }
+#endif
+        // 局部 stable SR: 与局部 SRR 同一截取口径 (首击落在
+        // [start-500, end+500]), rate 跟随会话 mods。
+        double segOfficialSr = kSrNotComputable;
+#if MRA_HAS_OFFICIAL_SR
+        try {
+            const std::vector<SrNote> allNotes =
+                srNotesFromBeatmap(s.beatmap);
+            const int lo = static_cast<int>(startMs) - 500;
+            const int hi = static_cast<int>(endMs) + 500;
+            std::vector<SrNote> clipped;
+            clipped.reserve(allNotes.size());
+            for (const SrNote& n : allNotes)
+                if (n.headMs >= lo && n.headMs <= hi)
+                    clipped.push_back(n);
+            if (!clipped.empty())
+                segOfficialSr = saneSr(OfficialStarRating(
+                    s.beatmap.keyCount, clipped,
+                    rateForMods(static_cast<int64_t>(s.replay.header.mods))));
+        } catch (...) {
+            segOfficialSr = kSrNotComputable;
+        }
+#endif
         res.set_content(okResponse(json{
             {"startMs", seg.startTimeMs},
             {"endMs", seg.endTimeMs},
-            {"countMode", stableMode ? "stable" : "lazer"},
+            {"countMode", stableMode ? "scorev1" : "scorev2"},
             {"counts", countsJson(shownCounts)},
             {"headCounts", countsJson(seg.headCounts)},
-            {"accuracyScoreV1", std::round(accV1 * 100000) / 100000},
-            {"accuracyScoreV2", std::round(accV2 * 100000) / 100000},
+            {"accuracyScoreV1", round5(accV1)},
+            {"accuracyScoreV2", round5(accV2)},
+            // 双计数口径 × 双权重 (与 /summary 同构, 供前端并列显示)
+            {"countsStable", countsJson(seg.stableCounts)},
+            {"countsPairwise", countsJson(seg.counts)},
+            {"accuracyDetail", json{
+                {"stable", json{{"scoreV1", round5(seg.stableAccuracyV1)},
+                                {"scoreV2", round5(seg.stableAccuracyV2)}}},
+                {"pairwise", json{{"scoreV1", round5(seg.accuracyV1)},
+                                  {"scoreV2", round5(seg.accuracyV2)}}}}},
             {"offsets", offsetStatsJson(seg.offsets)},
+            {"srrSr", segSrrSr},
+            {"officialSr", segOfficialSr},
             {"perColumn", columnStatsJson(seg.perColumn)}}).dump(),
                         "application/json");
     });
@@ -1265,11 +1590,11 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON", "request body is not valid JSON");
+            return sendError(req, res, 400, "INVALID_JSON", "request body is not valid JSON");
         }
         std::string folder = body.value("folder", "");
         if (folder.empty())
-            return sendError(res, 400, "MISSING_PATH", "folder is required");
+            return sendError(req, res, 400, "MISSING_PATH", "folder is required");
         SkinLoader loader = SkinLoader::loadFromFolder(folder);
         json resources = json::array();
         for (auto& [name, img] : loader.definition().images)
@@ -1289,21 +1614,21 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         std::string sessionId = body.value("sessionId", "");
         std::string folder = body.value("folder", "");
         if (sessionId.empty() || folder.empty())
-            return sendError(res, 400, "MISSING_PATH",
+            return sendError(req, res, 400, "MISSING_PATH",
                              "sessionId and folder are required");
         std::error_code ec;
         fs::path p = mra::pathFromUtf8(folder);
         if (!fs::exists(p, ec) || !fs::is_directory(p, ec))
-            return sendError(res, 400, "FOLDER_NOT_FOUND",
+            return sendError(req, res, 400, "FOLDER_NOT_FOUND",
                              "not an existing directory", folder);
         if (!SessionStore::instance().setSkinFolder(sessionId, folder))
-            return sendError(res, 404, "SESSION_NOT_FOUND",
+            return sendError(req, res, 404, "SESSION_NOT_FOUND",
                              "unknown session id");
         mergeLastState({{"skin", folder}});
         res.set_content(okResponse(json{{"folder", folder}}).dump(),
@@ -1314,13 +1639,13 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         if (!s.skinFolder)
-            return sendError(res, 404, "SKIN_NOT_LOADED", "no skin loaded");
+            return sendError(req, res, 404, "SKIN_NOT_LOADED", "no skin loaded");
         SkinLoader loader = SkinLoader::loadFromFolder(*s.skinFolder);
         std::string element = req.matches[2];
         auto img = loader.findElement(element);
-        if (!img) return sendError(res, 404, "RESOURCE_NOT_FOUND", "no such element");
+        if (!img) return sendError(req, res, 404, "RESOURCE_NOT_FOUND", "no such element");
         std::string lower = img->fileName;
         for (char& c : lower) c = static_cast<char>(std::tolower((unsigned char)c));
         const char* mime = lower.ends_with(".png") ? "image/png" : "image/jpeg";
@@ -1334,16 +1659,16 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             [](const httplib::Request& req, httplib::Response& res) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
-            return sendError(res, 404, "SESSION_NOT_FOUND", "unknown session id");
+            return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         if (!s.skinFolder)
-            return sendError(res, 404, "SKIN_NOT_LOADED", "no skin loaded");
+            return sendError(req, res, 404, "SKIN_NOT_LOADED", "no skin loaded");
         std::string name = req.matches[2];
         if (name.empty() || name.find("..") != std::string::npos)
-            return sendError(res, 400, "INVALID_NAME", "bad file name");
+            return sendError(req, res, 400, "INVALID_NAME", "bad file name");
         fs::path p = mra::pathFromUtf8(*s.skinFolder) / mra::pathFromUtf8(name);
         std::vector<uint8_t> bytes;
         if (auto err = readFileBytes(p, bytes))
-            return sendError(res, 404, "SKIN_FILE_NOT_FOUND", *err);
+            return sendError(req, res, 404, "SKIN_FILE_NOT_FOUND", *err);
         res.set_content(reinterpret_cast<const char*>(bytes.data()),
                         bytes.size(), "text/plain; charset=utf-8");
     });
@@ -1356,16 +1681,16 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         std::string path = body.value("path", "");
         if (path.empty())
-            return sendError(res, 400, "MISSING_PATH", "path is required");
+            return sendError(req, res, 400, "MISSING_PATH", "path is required");
         ScoresDb db;
         std::string err;
         if (!parseScoresDb(path, db, err))
-            return sendError(res, 400, "PARSE_ERROR",
+            return sendError(req, res, 400, "PARSE_ERROR",
                              "failed to parse scores.db", err);
         int64_t dbVersion = db.version;
         int64_t groupCount = static_cast<int64_t>(db.groups.size());
@@ -1449,21 +1774,21 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         std::string folder = body.value("folder", "");
         if (folder.empty())
-            return sendError(res, 400, "MISSING_PATH", "folder is required");
+            return sendError(req, res, 400, "MISSING_PATH", "folder is required");
         std::error_code ec;
         fs::path p = mra::pathFromUtf8(folder);
         if (!fs::exists(p, ec) || !fs::is_directory(p, ec))
-            return sendError(res, 400, "FOLDER_NOT_FOUND",
+            return sendError(req, res, 400, "FOLDER_NOT_FOUND",
                              "not an existing directory", folder);
         {
             std::lock_guard<std::mutex> lock(scoresMutex_);
             if (!scoresLoaded_)
-                return sendError(res, 404, "SCORES_NOT_LOADED",
+                return sendError(req, res, 404, "SCORES_NOT_LOADED",
                                  "load scores.db first");
             dataRFolder_ = folder;
             dataRAuto_ = false;
@@ -1482,16 +1807,16 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         std::string folder = body.value("folder", "");
         if (folder.empty())
-            return sendError(res, 400, "MISSING_PATH", "folder is required");
+            return sendError(req, res, 400, "MISSING_PATH", "folder is required");
         std::error_code ec;
         fs::path p = mra::pathFromUtf8(folder);
         if (!fs::exists(p, ec) || !fs::is_directory(p, ec))
-            return sendError(res, 400, "FOLDER_NOT_FOUND",
+            return sendError(req, res, 400, "FOLDER_NOT_FOUND",
                              "not an existing directory", folder);
         {
             std::lock_guard<std::mutex> lock(scoresMutex_);
@@ -1513,13 +1838,13 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         {
             std::lock_guard<std::mutex> lock(scoresMutex_);
             if (!scoresLoaded_ || !scores_)
-                return sendError(res, 404, "SCORES_NOT_LOADED",
+                return sendError(req, res, 404, "SCORES_NOT_LOADED",
                                  "no scores.db loaded");
             if (dataRFolder_.empty())
-                return sendError(res, 422, "DATAR_NOT_SET",
+                return sendError(req, res, 422, "DATAR_NOT_SET",
                                  "Data\\r folder is not selected");
             if (songsFolder_.empty())
-                return sendError(res, 422, "SONGS_NOT_SET",
+                return sendError(req, res, 422, "SONGS_NOT_SET",
                                  "Songs folder is not selected");
         }
         json body = json::object();
@@ -1557,7 +1882,9 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         if (!force && !dbMd5.empty()) {
             std::lock_guard<std::mutex> lock(scoresMutex_);
             if (!browseCacheResponse_.empty() &&
-                browseCacheMd5_ == dbMd5 && browseCacheMode_ == modeFilter) {
+                browseCacheMd5_ == dbMd5 && browseCacheMode_ == modeFilter &&
+                browseCacheVersion_ == kBrowseResponseCacheVersion) {
+                debuglog::log("browse L1 hit");
                 res.set_content(browseCacheResponse_, "application/json");
                 return;
             }
@@ -1588,15 +1915,18 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                 const json& bc = state["browseCache"];
                 std::string savedMd5;
                 int savedMode = -1;
+                int savedVersion = 0;  // absent = pre-schema build
                 try {
                     savedMd5 = bc.value("scoresDbMd5", std::string{});
                     savedMode = bc.value("mode", -1);
+                    savedVersion = bc.value("cacheVersion", 0);
                 } catch (...) {
                     savedMd5.clear();
                 }
                 auto sidecar = browseCacheSidecarPath();
                 std::vector<uint8_t> bytes;
                 if (savedMd5 == dbMd5 && savedMode == modeFilter &&
+                    savedVersion == kBrowseResponseCacheVersion &&
                     !sidecar.empty() && !readFileBytes(sidecar, bytes)) {
                     std::string cached(bytes.begin(), bytes.end());
                     // Coarse sanity check: must look like the JSON object
@@ -1608,8 +1938,10 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                             std::lock_guard<std::mutex> lock(scoresMutex_);
                             browseCacheMd5_ = dbMd5;
                             browseCacheMode_ = modeFilter;
+                            browseCacheVersion_ = kBrowseResponseCacheVersion;
                             browseCacheResponse_ = cached;
                         }
+                        debuglog::log("browse L2 hit");
                         res.set_content(cached, "application/json");
                         return;
                     }
@@ -1624,7 +1956,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             refreshScoreStoresLocked(buildErr);
         }
         if (!buildErr.empty())
-            return sendError(res, 422, "INDEX_BUILD_FAILED", buildErr);
+            return sendError(req, res, 422, "INDEX_BUILD_FAILED", buildErr);
         // Collect + sort under the lock (entries are served by pointer).
         std::vector<const ScoreEntry*> picked;
         int64_t total = 0;
@@ -1657,6 +1989,20 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             auto bit = songsIndex_.find(s->beatmapMd5);
             const SongsBeatmapMeta* meta =
                 bit != songsIndex_.end() ? &bit->second : nullptr;
+            // SR 列 = stable 星数 (官方 SR, 按行 mods 选档: DT/NC→srDt,
+            // HT→srHt, 其余→srBase); Sunny SR 列 = SRR 全局。pp 沿用官方
+            // 口径 (与 SR 列同源)。只读索引缓存字段, 命中路径不进这里。
+            double rowSr = kSrNotComputable;
+#if MRA_HAS_OFFICIAL_SR
+            if (meta) rowSr = officialSrForMods(*meta, s->mods);
+#endif
+            double rowSunnySr = kSrNotComputable;
+#if MRA_HAS_SRR_SR
+            if (meta) rowSunnySr = saneSr(meta->srrSr);
+#endif
+            const double rowPp = officialPpFromCounts(
+                rowSr, s->geki, s->c300, s->katu, s->c100, s->c50,
+                s->miss, s->mods);
             bool hasReplay = rit != replayIndex_.end() ||
                              replayTickIndex_.count(tickKeyFor(s, 0)) > 0 ||
                              replayTickIndex_.count(tickKeyFor(s, -10000)) > 0 ||
@@ -1681,6 +2027,11 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                 {"creator", meta ? meta->creator : ""},
                 {"version", meta ? meta->version : ""},
                 {"keyCount", meta ? meta->keyCount : ""},
+                {"sr", rowSr},
+                {"sunnySr", rowSunnySr},
+                {"bpm", meta ? meta->bpm : -1.0},
+                {"lengthMs", meta ? meta->lengthMs : int64_t(-1)},
+                {"pp", rowPp},
                 {"hasReplay", hasReplay},
             });
         }
@@ -1691,6 +2042,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                             {"returned", arr.size()},
                             {"scores", std::move(arr)}})
                 .dump();
+        debuglog::log("browse rebuild rows=" + std::to_string(total));
         // Remember the fully built response, keyed by the scores.db MD5 and
         // mode filter, so unchanged scores.db requests skip the whole
         // refresh + rebuild path (only keyed responses are cached). The
@@ -1700,6 +2052,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                 std::lock_guard<std::mutex> lock(scoresMutex_);
                 browseCacheMd5_ = dbMd5;
                 browseCacheMode_ = modeFilter;
+                browseCacheVersion_ = kBrowseResponseCacheVersion;
                 browseCacheResponse_ = response;
             }
             // L2 (disk): persist the response sidecar plus its key next to
@@ -1712,7 +2065,9 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             }
             mergeLastState(json{{"browseCache",
                                  json{{"scoresDbMd5", dbMd5},
-                                      {"mode", modeFilter}}}});
+                                      {"mode", modeFilter},
+                                      {"cacheVersion",
+                                       kBrowseResponseCacheVersion}}}});
         }
         res.set_content(response, "application/json");
     });
@@ -1726,7 +2081,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         std::string replayMd5 = body.value("replayMd5", "");
@@ -1739,19 +2094,19 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                 playedTicks = std::stoll(ticksStr);
                 hasTicks = true;
             } catch (...) {
-                return sendError(res, 400, "INVALID_PARAM",
+                return sendError(req, res, 400, "INVALID_PARAM",
                                  "playedTicks must be an integer string");
             }
         }
         if (!hasTicks && !isMd5Hex(replayMd5))
-            return sendError(res, 400, "INVALID_PARAM",
+            return sendError(req, res, 400, "INVALID_PARAM",
                              "need playedTicks or a 32-hex replayMd5");
         std::string replayPath, beatmapPath, audioPath;
         std::string beatmapMd5;
         {
             std::lock_guard<std::mutex> lock(scoresMutex_);
             if (!scoresLoaded_ || !scores_)
-                return sendError(res, 404, "SCORES_NOT_LOADED",
+                return sendError(req, res, 404, "SCORES_NOT_LOADED",
                                  "no scores.db loaded");
             {
                 std::string ferr;
@@ -1767,10 +2122,10 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                     }
                 }
             if (!found)
-                return sendError(res, 404, "SCORE_NOT_FOUND",
+                return sendError(req, res, 404, "SCORE_NOT_FOUND",
                                  "score not in loaded scores.db");
             if (!replayIndexBuilt_ || !songsIndexBuilt_)
-                return sendError(res, 422, "INDEX_NOT_BUILT",
+                return sendError(req, res, 422, "INDEX_NOT_BUILT",
                                  "browse the score list first (indexes not built)");
             // osu's own pairing: <beatmapMd5>-<filetime ticks>, ±1 ms slack;
             // fall back to the replay-md5 header index.
@@ -1804,11 +2159,11 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             // rather than silently analyze a different playthrough of the
             // same map.
             if (replayPath.empty())
-                return sendError(res, 404, "REPLAY_NOT_IN_CACHE",
+                return sendError(req, res, 404, "REPLAY_NOT_IN_CACHE",
                                  "no .osr for this replay in Data\\r");
             auto bit = songsIndex_.find(found->beatmapMd5);
             if (bit == songsIndex_.end())
-                return sendError(res, 404, "BEATMAP_NOT_IN_SONGS",
+                return sendError(req, res, 404, "BEATMAP_NOT_IN_SONGS",
                                  "no .osu with this md5 in the Songs folder");
             beatmapPath = bit->second.path;
             beatmapMd5 = found->beatmapMd5;
@@ -1819,10 +2174,15 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                 audioPath = mra::pathToUtf8(audio);
             }
         }
+        const auto loadT0 = std::chrono::steady_clock::now();
         LoadOutcome out = loadReplaySession(replayPath, beatmapPath,
                                             audioPath, skinFolder);
+        debuglog::log("load browser " + std::to_string(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - loadT0).count()) +
+            "ms ok=" + (out.ok ? "1" : "0"));
         if (!out.ok)
-            return sendError(res, 422, out.errorCode, out.message);
+            return sendError(req, res, 422, out.errorCode, out.message);
         res.set_content(okResponse(json{{"sessionId", out.sessionId},
                                         {"replayPath", replayPath},
                                         {"beatmapPath", beatmapPath},
@@ -1838,7 +2198,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         if (req.has_param("mode")) {
             try { modeFilter = std::stoi(req.get_param_value("mode")); }
             catch (...) {
-                return sendError(res, 400, "INVALID_PARAM",
+                return sendError(req, res, 400, "INVALID_PARAM",
                                  "mode must be an integer");
             }
         }
@@ -1846,7 +2206,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         if (req.has_param("limit")) {
             try { limit = std::stoi(req.get_param_value("limit")); }
             catch (...) {
-                return sendError(res, 400, "INVALID_PARAM",
+                return sendError(req, res, 400, "INVALID_PARAM",
                                  "limit must be an integer");
             }
             limit = std::max(1, std::min(20000, limit));
@@ -1855,7 +2215,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         // so a concurrent load swapping scores_ must not dangle them.
         std::lock_guard<std::mutex> lock(scoresMutex_);
         if (!scoresLoaded_ || !scores_)
-            return sendError(res, 404, "SCORES_NOT_LOADED",
+            return sendError(req, res, 404, "SCORES_NOT_LOADED",
                              "no scores.db loaded");
         std::vector<const ScoreEntry*> picked;
         int64_t total = 0;
@@ -1916,11 +2276,11 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             in = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         if (!in.is_object())
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body must be a JSON object");
         json existing = json::object();
         {
@@ -1944,9 +2304,19 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             existing["volume"] = in["volume"].get<double>();
         if (in.contains("showInputJudges") && in["showInputJudges"].is_boolean())
             existing["showInputJudges"] = in["showInputJudges"].get<bool>();
+        if (in.contains("debugLog") && in["debugLog"].is_boolean()) {
+            existing["debugLog"] = in["debugLog"].get<bool>();
+            debuglog::setEnabled(existing["debugLog"].get<bool>());
+        }
+        if (in.contains("scoreColWidths") && in["scoreColWidths"].is_array()) {
+            json arr = json::array();
+            for (const auto& v : in["scoreColWidths"])
+                if (v.is_number()) arr.push_back(v.get<double>());
+            if (!arr.empty()) existing["scoreColWidths"] = arr;
+        }
         std::ofstream f(lastStatePath(), std::ios::binary | std::ios::trunc);
         if (!f)
-            return sendError(res, 500, "STATE_WRITE_FAILED",
+            return sendError(req, res, 500, "STATE_WRITE_FAILED",
                              "cannot write last-state file");
         f << existing.dump();
         res.set_content(okResponse(existing).dump(), "application/json");
@@ -1967,7 +2337,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         try {
             if (!req.body.empty()) body = json::parse(req.body);
         } catch (...) {
-            return sendError(res, 400, "INVALID_JSON",
+            return sendError(req, res, 400, "INVALID_JSON",
                              "request body is not valid JSON");
         }
         if (req.path == "/api/dialog/open-file") {
@@ -2013,16 +2383,16 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
     svr.Post("/api/dialog/open-folder", dialogRoute);
 
     svr.set_exception_handler(
-        [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
+        [](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
             std::string msg = "unknown error";
             try { if (ep) std::rethrow_exception(ep); }
             catch (const std::exception& e) { msg = e.what(); }
-            sendError(res, 500, "INTERNAL_ERROR", msg);
+            sendError(req, res, 500, "INTERNAL_ERROR", msg);
         });
 
     // ---- Static frontend (embedded RCDATA in release, disk in dev) ----
     svr.Get("/.*", [this](const httplib::Request& req, httplib::Response& res) {
-        if (!assetProvider_) return sendError(res, 404, "NOT_FOUND", "no route");
+        if (!assetProvider_) return sendError(req, res, 404, "NOT_FOUND", "no route");
         std::string urlPath = req.path;
         if (urlPath == "/") urlPath = "/index.html";
         EmbeddedAsset asset;
@@ -2037,7 +2407,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                             asset.bytes.size(), asset.mime.c_str());
             return;
         }
-        sendError(res, 404, "NOT_FOUND", "asset not found: " + urlPath);
+        sendError(req, res, 404, "NOT_FOUND", "asset not found: " + urlPath);
     });
 }
 

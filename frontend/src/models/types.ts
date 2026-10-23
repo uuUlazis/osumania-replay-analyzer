@@ -56,11 +56,46 @@ export interface ConsistencyItem {
   pass: boolean | null;
 }
 
+// 判定窗两套取值 (后端 matcher 实际上报, 见 /summary 的 windows 字段)
+export interface ManiaWindowsDto {
+  perfect: number;
+  great: number;
+  good: number;
+  ok: number;
+  meh: number;
+  miss: number;
+}
+
+// 同一份 counts 下的两个 acc 权重口径: scoreV1 (legacy, MAX=300) /
+// scoreV2 (MAX=305, 分母 305N)。
+export interface AccuracyPair {
+  scoreV1: number;
+  scoreV2: number;
+}
+
+// 双计数口径: stable = 每物件一次 (LN 单计, osu!stable .osr 口径);
+// pairwise = LN 头尾各计 (lazer / ScoreV2 口径)。
+export interface AccuracyDetail {
+  stable: AccuracyPair;
+  pairwise: AccuracyPair;
+}
+
 export interface AnalysisSummary {
   counts: JudgementCounts;
   rulesProfile: "v1" | "v2";
+  // "stable" = 每物件一次 (LN 单计) / "lazer" = LN 头尾各计
+  countMode?: "scorev1" | "scorev2" | "stable" | "lazer";   // 兼容旧后端返回值
   headCounts: JudgementCounts;
   accuracy: { scoreV1: number; scoreV2: number };
+  // 下面五项是向后兼容的新增字段: 旧后端不返回时前端优雅回退
+  countsStable?: JudgementCounts;
+  countsPairwise?: JudgementCounts;
+  accuracyDetail?: AccuracyDetail;
+  // .osr 原始 mod 位 / 判定 rate / 实际生效的判定窗 (MRA_RE_WIN 整数化 +
+  // HR/EZ/DT/HT 因子之后)
+  mods?: number;
+  rate?: number;
+  windows?: { integral: boolean; v1: ManiaWindowsDto; v2: ManiaWindowsDto };
   offsets: OffsetStats;
   tailOffsets: OffsetStats;
   histogram: HistogramBucket[];
@@ -78,6 +113,8 @@ export interface AnalysisSummary {
   unmatchedObjects: number;
   firstEventTimeMs: number;
   lastEventTimeMs: number;
+  // 官方公式 pp (.osr 标定 counts + 官方 SR; -1 = SR 不可算)
+  pp?: number;
   osrDeclared: {
     counts: {
       n300: number;
@@ -162,11 +199,20 @@ export interface ReplayFrameDto {
 export interface SegmentResult {
   startMs: number;
   endMs: number;
+  countMode?: "scorev1" | "scorev2" | "stable" | "lazer";   // 兼容旧后端返回值
   counts: JudgementCounts;
   headCounts: JudgementCounts;
   accuracyScoreV1: number;
   accuracyScoreV2: number;
+  // 双计数口径 (可选, 旧后端不返回)
+  countsStable?: JudgementCounts;
+  countsPairwise?: JudgementCounts;
+  accuracyDetail?: AccuracyDetail;
   offsets: OffsetStats;
+  // 选段局部 SRR SR (-1 = 不可算)
+  srrSr?: number;
+  // 选段局部 stable SR (官方算法, rate 跟随 mods; -1 = 不可算)
+  officialSr?: number;
   perColumn: ColumnStats[];
 }
 
@@ -267,6 +313,16 @@ export interface ScoreBrowseRow {
   creator: string;
   version: string;
   keyCount: string;
+  // stable 星数 (官方 SR, 按行 mods 档位; -1 = 不可算/无谱面)
+  sr?: number;
+  // sunnyxxy rework (SRR) 全局星数 (-1 = 不可算/无谱面)
+  sunnySr?: number;
+  // BPM (驻留最长无继承段; -1 = 不可算)
+  bpm?: number;
+  // 物件跨度长度 ms (-1 = 不可算)
+  lengthMs?: number;
+  // 官方公式 pp (lazer 移植 SR × 行 counts; -1 = SR 不可算)
+  pp?: number;
   hasReplay: boolean;
 }
 

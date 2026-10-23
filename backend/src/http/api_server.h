@@ -27,6 +27,17 @@ struct SongsBeatmapMeta {
     std::string version;
     // [Metadata]CircleSize (mania key count) for the browse list.
     std::string keyCount;
+    // ---- SR index (songs sidecar v2; -1 = not computable / not scanned) ----
+    // Official star rating at clock rate 1.0 / 1.5 (DT+NC) / 0.75 (HT)
+    // (docs/pp-sr-notes.md §3.8: only rate mods change mania SR), and the
+    // SRR global star rating at the beatmap's own OD.
+    double officialSrBase = -1.0;
+    double officialSrDt = -1.0;
+    double officialSrHt = -1.0;
+    double srrSr = -1.0;
+    // BPM (驻留时长最长的无继承 timing 段) 与物件跨度长度 ms; -1 = 不可算
+    double bpm = -1.0;
+    int64_t lengthMs = -1;
 };
 
 // Loads the full analysis pipeline for a replay+beatmap pair and registers a
@@ -126,6 +137,10 @@ class ApiServer {
     // restart can also serve an unchanged scores.db without rebuilding.
     std::string browseCacheMd5_;
     int browseCacheMode_ = -1;
+    // Row-schema version of browseCacheResponse_ (kBrowseResponseCacheVersion
+    // in api_server.cpp): bumped when the row schema changes so caches built
+    // by older builds fail the key check and are rebuilt once.
+    int browseCacheVersion_ = 0;
     std::string browseCacheResponse_;
 
     // Re-reads scores.db and refreshes both indexes when the disk changed

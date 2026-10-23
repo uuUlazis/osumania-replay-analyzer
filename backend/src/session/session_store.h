@@ -47,6 +47,9 @@ struct ReplaySession {
     std::vector<ReplaySegment> segments;
     std::optional<std::string> audioPath;  // optional music for synced playback
     bool ready = false;
+    // Creation order (set by SessionStore::create). Eviction always removes
+    // the smallest seq - the oldest session - never the active one.
+    uint64_t insertSeq = 0;
 };
 
 // Thread-safe session registry (single session for v1, keyed by id).
@@ -71,6 +74,7 @@ class SessionStore {
     mutable std::mutex mutex_;
     std::map<std::string, ReplaySession> sessions_;
     int64_t nextSegmentId_ = 1;
+    uint64_t insertSeq_ = 0;
 };
 
 }  // namespace mra

@@ -140,9 +140,29 @@ table.hits thead th {
 .timeline-wrap { padding: 4px 14px 10px; }
 .timeline-canvas { width: 100%; height: 120px; display: block; border-radius: 4px; cursor: crosshair; }
 
+.preview-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
 .preview-canvas {
   flex: 1; display: block; width: 100%; min-height: 0;
 }
+.preview-loading {
+  position: absolute; inset: 0; z-index: 3;
+  background: rgba(16, 18, 24, 0.94);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; color: var(--text-dim); font-size: 13px;
+}
+.preview-spinner {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.14); border-top-color: var(--accent);
+  animation: preview-spin 0.9s linear infinite;
+}
+@keyframes preview-spin { to { transform: rotate(360deg); } }
+/* 成绩库表头列宽拖拽热区 */
+.score-tr-head span { position: relative; }
+.score-tr-head .col-resizer {
+  position: absolute; top: 0; right: -4px; width: 9px; height: 100%;
+  cursor: col-resize; z-index: 2;
+}
+.score-tr-head .col-resizer:hover { background: rgba(87, 200, 255, 0.25); }
 
 .transport {
   display: flex; align-items: center; gap: 10px;

@@ -2,7 +2,7 @@ import { useSyncExternalStore, useState } from "react";
 import { api } from "../api/client";
 import { sessionStore } from "../app/sessionStore";
 import { playerStore } from "../app/playerStore";
-import { fmtMs, fmtTime } from "./AnalysisSummary";
+import { fmtMs, fmtTime, fmtAcc } from "./AnalysisSummary";
 import type { SegmentResult } from "../models/types";
 
 export default function SegmentPanel() {
@@ -44,12 +44,21 @@ export default function SegmentPanel() {
       {seg && (
         <div className="stat-grid" style={{ marginTop: 8 }}>
           <div className="stat">
-            <div className="label">选段 ACC</div>
+            <div className="label">Accuracy</div>
             <div className="value" style={{ fontSize: 14 }}>
-              {((snap.analysis?.rulesProfile ?? "v1") === "v2"
-                ? seg.accuracyScoreV2
-                : seg.accuracyScoreV1).toFixed(2)}
-              %
+              {fmtAcc((snap.analysis?.rulesProfile ?? "v1") === "v2" ? seg.accuracyScoreV2 : seg.accuracyScoreV1)}
+            </div>
+          </div>
+          <div className="stat">
+            <div className="label">Stable SR</div>
+            <div className="value" style={{ fontSize: 14 }}>
+              {seg.officialSr != null && seg.officialSr >= 0 ? seg.officialSr.toFixed(2) : "无法计算"}
+            </div>
+          </div>
+          <div className="stat">
+            <div className="label">Sunny SR</div>
+            <div className="value" style={{ fontSize: 14 }}>
+              {seg.srrSr != null && seg.srrSr >= 0 ? seg.srrSr.toFixed(2) : "无法计算"}
             </div>
           </div>
           <div className="stat">

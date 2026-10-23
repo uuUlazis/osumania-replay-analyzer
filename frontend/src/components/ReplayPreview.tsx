@@ -103,6 +103,10 @@ export default function ReplayPreview() {
     const ks: boolean[] = [];
     for (let c = 0; c < keyCount; ++c) ks.push((keys & (1 << c)) !== 0);
 
+    // 皮肤未就绪 (会话已载入): 渲染完全静止 — 不画默认配色/背景/判定线,
+    // 由灰屏遮罩接管; 皮肤到位后本 effect 因依赖变化重跑, 直接以皮肤绘制。
+    if (sid && !skin) return;
+
     // 判定规则 V2 draws the ScoreV2 match (falls back to V1 events when the
     // session predates the second pass).
     const events =
@@ -123,6 +127,14 @@ export default function ReplayPreview() {
   }, [visible, snap.events, snap.eventsV2, snap.frames, player.previewTimeMs, keyCount, player.scrollSpeed, windowMs, snap.sessionId, skin, player.showInputJudges, judgeVersion]);
 
   return (
-    <canvas ref={canvasRef} className="preview-canvas" />
+    <div className="preview-wrap">
+      <canvas ref={canvasRef} className="preview-canvas" />
+      {sid && !skin && (
+        <div className="preview-loading">
+          <div className="preview-spinner" />
+          正在载入皮肤…
+        </div>
+      )}
+    </div>
   );
 }

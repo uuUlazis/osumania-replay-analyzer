@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { api, ApiError } from "../api/client";
 import type { ScoreBrowseRow } from "../models/types";
 import { KEY_MOD_NAMES, MOD_NAMES } from "../models/types";
@@ -13,7 +20,8 @@ interface Props {
 // 表头点击排序键 (谱面md5 为哈希串, 不参与排序)
 type SortKey =
   | "date" | "keys" | "title" | "artist" | "version"
-  | "mods" | "acc" | "score" | "player" | "replay";
+  | "mods" | "acc" | "sr" | "sunnySr" | "pp" | "bpm" | "length"
+  | "score" | "player" | "replay";
 
 // 表头定义, 列序同 GRID_TEMPLATE 注释; key=null 表示不可排序。
 // 居中列 (cls): 键数/ACC/分数 = num, Mods/有回放/谱面md5 = ctr; 其余左对齐。
@@ -26,7 +34,12 @@ const HEADERS: { key: SortKey | null; label: string; cls: string }[] = [
   { key: "mods", label: "Mods", cls: "ctr" },
   { key: "acc", label: "ACC", cls: "num" },
   { key: "score", label: "分数", cls: "num" },
+  { key: "sr", label: "SR", cls: "num" },
+  { key: "sunnySr", label: "Sunny SR", cls: "num" },
+  { key: "pp", label: "pp", cls: "num" },
   { key: "player", label: "玩家", cls: "" },
+  { key: "bpm", label: "BPM", cls: "num" },
+  { key: "length", label: "长度", cls: "num" },
   { key: "replay", label: "有回放", cls: "ctr" },
   { key: null, label: "谱面md5", cls: "ctr" },
 ];
@@ -37,10 +50,15 @@ const MAX_RENDER = 500;
 const MODE_MANIA = 3;
 
 // 列宽模板 (inline 覆盖 global.css 的 .score-tr 定义), 列序:
-// 日期 | 键数 | 歌曲名 | 曲师 | 难度名 | Mods | ACC | 分数 | 玩家 | 有回放 | 谱面md5
+// 日期 | 键数 | 歌曲名 | 曲师 | 难度名 | Mods | ACC | 分数 | SR | Sunny SR | pp | 玩家 | BPM | 长度 | 有回放 | 谱面md5
 const GRID_TEMPLATE =
   "118px 48px minmax(140px, 1.4fr) minmax(90px, 0.9fr) minmax(90px, 0.9fr) " +
-  "70px 62px 78px minmax(90px, 0.8fr) 52px 230px";
+  "70px 62px 78px 52px 56px 56px minmax(90px, 0.8fr) 52px 56px 52px 230px";
+
+// 各列默认像素宽 (与列序一致; fr 文本列取名义值, 供列宽拖拽/重置)
+const DEFAULT_COL_PX = [
+  118, 48, 200, 120, 120, 70, 62, 78, 52, 56, 56, 110, 52, 56, 52, 230
+];
 
 function modsText(mods: number): string {
   const parts: string[] = [];
@@ -92,10 +110,81 @@ function acc(row: ScoreBrowseRow): string {
   return v < 0 ? "-" : v.toFixed(2) + "%";
 }
 
+// SR / pp: -1 或缺字段 (旧缓存行) 显示 "—"
+function srText(row: ScoreBrowseRow): string {
+  return row.sr != null && row.sr >= 0 ? row.sr.toFixed(2) : "—";
+}
+
+function ppText(row: ScoreBrowseRow): string {
+  return row.pp != null && row.pp >= 0 ? row.pp.toFixed(1) : "—";
+}
+
+// 排序数值: 缺字段/-1 垫底 (与 accValue 的 -1 约定一致)
+function sortableOrMinusOne(v: number | undefined): number {
+  return v != null && v >= 0 ? v : -1;
+}
+
 // keyCount 后端以字符串传输, 排序前转数值 (空/无效记 0)
 function keyCountNum(s: string): number {
   const v = parseFloat(s);
   return Number.isFinite(v) ? v : 0;
+}
+
+// 长度列: m:ss 文本
+function lenText(ms: number | undefined): string {
+  if (ms == null || ms < 0) return "—";
+  const s2 = Math.round(ms / 1000);
+  return Math.floor(s2 / 60) + ":" + String(s2 % 60).padStart(2, "0");
+}
+
+// ---- stable 式命令筛选 (Beatmap_search wiki): 字段+操作符+值, 空格分割,
+// 多条件 AND, 与自由文本共存。未知 token 回退文本匹配。
+type CmpOp = "=" | "==" | "!=" | "<" | ">" | "<=" | ">=";
+const NUM_FIELDS: Record<string, (r: ScoreBrowseRow) => number> = {
+  key: (r) => keyCountNum(r.keyCount),
+  keys: (r) => keyCountNum(r.keyCount),
+  cs: (r) => keyCountNum(r.keyCount),
+  stars: (r) => sortableOrMinusOne(r.sr),
+  star: (r) => sortableOrMinusOne(r.sr),
+  sunny: (r) => sortableOrMinusOne(r.sunnySr),
+  acc: (r) => accValue(r),
+  pp: (r) => sortableOrMinusOne(r.pp),
+  bpm: (r) => sortableOrMinusOne(r.bpm),
+  length: (r) => (r.lengthMs != null && r.lengthMs >= 0 ? r.lengthMs / 1000 : -1),
+  score: (r) => r.totalScore,
+};
+const TEXT_FIELDS: Record<string, (r: ScoreBrowseRow) => string> = {
+  artist: (r) => r.artist,
+  creator: (r) => r.creator,
+  title: (r) => r.title,
+  difficulty: (r) => r.version,
+  diff: (r) => r.version,
+  player: (r) => r.playerName,
+};
+function numEq(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 0.005;  // 容差覆盖 lazer 两位截断显示
+}
+function cmpNum(a: number, op: CmpOp, b: number): boolean {
+  switch (op) {
+    case "=": case "==": return numEq(a, b);
+    case "!=": return !numEq(a, b);
+    case "<": return a < b;
+    case ">": return a > b;
+    case "<=": return a <= b;
+    case ">=": return a >= b;
+  }
+}
+function cmpText(a: string, op: CmpOp, b: string): boolean {
+  const hay = a.toLowerCase(), needle = b.toLowerCase();
+  if (op === "!=") return !hay.includes(needle);
+  return hay.includes(needle);  // = 及其他操作符一律包含匹配
+}
+// length 值: 纯数字=秒, "m:ss"=分秒
+function parseLengthSec(v: string): number {
+  const m = /^(\d+):(\d{1,2})$/.exec(v);
+  if (m) return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : NaN;
 }
 
 export default function ScoreBrowser({ open, onClose, onPlay, loading }: Props) {
@@ -107,6 +196,10 @@ export default function ScoreBrowser({ open, onClose, onPlay, loading }: Props) 
   const [sortKey, setSortKey] = useState<SortKey>("date");
   const [sortDesc, setSortDesc] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
+  // 列宽 (px): last_state 持久化, 表头右缘拖拽调整; null = 用默认模板
+  const [colWidths, setColWidths] = useState<number[] | null>(null);
+  const colWidthsRef = useRef<number[] | null>(null);
+  colWidthsRef.current = colWidths;
 
   // force=true: 让后端跳过响应缓存重扫 Data\r / Songs (读取新 .osr / 新谱面)。
   const fetchRows = useCallback(async (force = false) => {
@@ -135,6 +228,53 @@ export default function ScoreBrowser({ open, onClose, onPlay, loading }: Props) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, fetchRows]);
 
+  // 列宽恢复 (长度/内容校验不符则忽略)
+  useEffect(() => {
+    api
+      .lastState()
+      .then((s) => {
+        if (s && Array.isArray(s.scoreColWidths) &&
+            s.scoreColWidths.length === HEADERS.length)
+          setColWidths(
+            s.scoreColWidths.map((n) => Math.max(40, Math.round(n))),
+          );
+      })
+      .catch(() => undefined);
+  }, []);
+
+  // 列宽: 全 px 模板 (未自定义时用默认模板, 保留 fr 弹性)
+  const gridStyle = {
+    gridTemplateColumns: colWidths
+      ? colWidths.map((w) => w + "px").join(" ")
+      : GRID_TEMPLATE,
+  };
+  const startResize = (idx: number, e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const base = colWidths ?? DEFAULT_COL_PX;
+    const startW = base[idx];
+    const onMove = (ev: MouseEvent) => {
+      const w = Math.max(40, Math.min(800, Math.round(startW + ev.clientX - startX)));
+      setColWidths(base.map((v, i) => (i === idx ? w : v)));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const cur = colWidthsRef.current;
+      if (cur) api.saveLastState({ scoreColWidths: cur }).catch(() => undefined);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+  const resetColWidth = (idx: number) => {
+    setColWidths((cur) => {
+      const next = (cur ?? DEFAULT_COL_PX).map((w, i) =>
+        i === idx ? DEFAULT_COL_PX[i] : w);
+      api.saveLastState({ scoreColWidths: next }).catch(() => undefined);
+      return next;
+    });
+  };
   // 表头点击排序: 非日期列三态 (首击降序 → 再击升序 → 三击恢复默认日期降序);
   // 日期列双态 (降 ↔ 升, 默认态即日期降序, 无恢复击)。
   const toggleSort = (key: SortKey) => {
@@ -155,17 +295,46 @@ export default function ScoreBrowser({ open, onClose, onPlay, loading }: Props) 
   };
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    // 查询解析: 识别 stable 式命令 token (字段+操作符+值, 空格分割),
+    // 未识别的词回退自由文本包含匹配 (与命令 AND 共存)。
+    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const conds: { field: string; op: CmpOp; value: string }[] = [];
+    const textWords: string[] = [];
+    for (const w of words) {
+      const m = /^([a-z]+)(==|!=|<=|>=|<|>|=)(.*)$/.exec(w);
+      if (m && (NUM_FIELDS[m[1]] || TEXT_FIELDS[m[1]]))
+        conds.push({ field: m[1], op: m[2] as CmpOp, value: m[3] });
+      else textWords.push(w);
+    }
     let out = rows;
-    if (q)
-      out = out.filter(
-        (r) =>
-          r.title.toLowerCase().includes(q) ||
-          r.version.toLowerCase().includes(q) ||
-r.artist.toLowerCase().includes(q) ||
-          r.creator.toLowerCase().includes(q) ||
-          r.playerName.toLowerCase().includes(q),
-      );
+    for (const w of textWords) {
+      if (/^\d+$/.test(w)) {
+        // 裸数字: onlineId 精确匹配 (stable identifier 行为)
+        const id = Number(w);
+        out = out.filter((r) => r.onlineId === id);
+      } else {
+        out = out.filter(
+          (r) =>
+            r.title.toLowerCase().includes(w) ||
+            r.version.toLowerCase().includes(w) ||
+            r.artist.toLowerCase().includes(w) ||
+            r.creator.toLowerCase().includes(w) ||
+            r.playerName.toLowerCase().includes(w),
+        );
+      }
+    }
+    for (const c of conds) {
+      if (NUM_FIELDS[c.field]) {
+        const get = NUM_FIELDS[c.field];
+        const val =
+          c.field === "length" ? parseLengthSec(c.value) : parseFloat(c.value);
+        if (!Number.isFinite(val)) continue;
+        out = out.filter((r) => cmpNum(get(r), c.op as CmpOp, val));
+      } else {
+        const get = TEXT_FIELDS[c.field];
+        out = out.filter((r) => cmpText(get(r), c.op as CmpOp, c.value));
+      }
+    }
     const dir = sortDesc ? -1 : 1;
     const cmp: Record<SortKey, (a: ScoreBrowseRow, b: ScoreBrowseRow) => number> = {
       date: (a, b) => (a.playedMs - b.playedMs) * dir,
@@ -175,6 +344,13 @@ r.artist.toLowerCase().includes(q) ||
       version: (a, b) => a.version.localeCompare(b.version) * dir,
       mods: (a, b) => modsText(a.mods).localeCompare(modsText(b.mods)) * dir,
       acc: (a, b) => (accValue(a) - accValue(b)) * dir,
+      sr: (a, b) => (sortableOrMinusOne(a.sr) - sortableOrMinusOne(b.sr)) * dir,
+      sunnySr: (a, b) =>
+        (sortableOrMinusOne(a.sunnySr) - sortableOrMinusOne(b.sunnySr)) * dir,
+      pp: (a, b) => (sortableOrMinusOne(a.pp) - sortableOrMinusOne(b.pp)) * dir,
+      bpm: (a, b) => (sortableOrMinusOne(a.bpm) - sortableOrMinusOne(b.bpm)) * dir,
+      length: (a, b) =>
+        (sortableOrMinusOne(a.lengthMs) - sortableOrMinusOne(b.lengthMs)) * dir,
       score: (a, b) => (a.totalScore - b.totalScore) * dir,
       player: (a, b) => a.playerName.localeCompare(b.playerName) * dir,
       replay: (a, b) => ((a.hasReplay ? 1 : 0) - (b.hasReplay ? 1 : 0)) * dir,
@@ -203,7 +379,8 @@ r.artist.toLowerCase().includes(q) ||
         </div>
         <div className="score-modal-controls">
           <input
-            placeholder="搜索 谱面/曲师/谱师/玩家"
+            placeholder="搜索 谱面/曲师/难度/玩家 或 key=4 star>5 …"
+            title="支持 stable 式命令筛选, 空格分割多条件 AND: key/keys/cs=键数, star/stars=stable 星数, sunny=SRR 星数, acc 准度, pp, score, bpm, length(秒或 m:ss), player/artist/creator/title/difficulty 文本; 操作符 = == != < > <= >="
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -225,14 +402,16 @@ r.artist.toLowerCase().includes(q) ||
             <div
               className="score-tr score-tr-head"
               style={{
-                gridTemplateColumns: GRID_TEMPLATE,
+                gridTemplateColumns: colWidths
+                  ? colWidths.map((w) => w + "px").join(" ")
+                  : GRID_TEMPLATE,
                 position: "sticky",
                 top: 0,
                 zIndex: 1,
                 background: "#24262e",
               }}
             >
-              {HEADERS.map((h) => {
+              {HEADERS.map((h, idx) => {
                 const k = h.key;
                 return (
                   <span
@@ -243,6 +422,13 @@ r.artist.toLowerCase().includes(q) ||
                   >
                     {h.label}
                     {k === sortKey ? (sortDesc ? " ▼" : " ▲") : ""}
+                    <span
+                      className="col-resizer"
+                      title="拖拽调整列宽, 双击重置"
+                      onClick={(e) => e.stopPropagation()}
+                      onDoubleClick={() => resetColWidth(idx)}
+                      onMouseDown={(e) => startResize(idx, e)}
+                    />
                   </span>
                 );
               })}
@@ -256,7 +442,7 @@ r.artist.toLowerCase().includes(q) ||
                     "score-tr" + (sel ? " score-tr-sel" : "") +
                       (r.hasReplay ? "" : " score-tr-dead")
                   }
-                  style={{ gridTemplateColumns: GRID_TEMPLATE }}
+                  style={gridStyle}
                   onClick={() => setSelected(r.hasReplay ? r.playedTicks : null)}
                 >
                   <span>{fmtDate(r.playedMs)}</span>
@@ -271,8 +457,23 @@ r.artist.toLowerCase().includes(q) ||
                   <span className="ctr">{modsText(r.mods)}</span>
                   <span className="num">{acc(r)}</span>
                   <span className="num">{r.totalScore.toLocaleString()}</span>
+                  <span className="num" title={r.sr != null && r.sr >= 0 ? "stable 星数 (官方 SR, 按行 mods 档位)" : undefined}>
+                    {srText(r)}
+                  </span>
+                  <span className="num" title={r.sunnySr != null && r.sunnySr >= 0 ? "sunnyxxy rework (SRR) 全局星数" : undefined}>
+                    {r.sunnySr != null && r.sunnySr >= 0 ? r.sunnySr.toFixed(2) : "无法计算"}
+                  </span>
+                  <span className="num" title={r.pp != null && r.pp >= 0 ? "官方公式 pp (lazer 移植 SR × 行判定)" : undefined}>
+                    {ppText(r)}
+                  </span>
                   <span className="ellip" title={r.playerName}>
                     {r.playerName || "-"}
+                  </span>
+                  <span className="num" title={r.bpm != null && r.bpm >= 0 ? "BPM (驻留最长段)" : undefined}>
+                    {r.bpm != null && r.bpm >= 0 ? Math.round(r.bpm) : "—"}
+                  </span>
+                  <span className="num" title={r.lengthMs != null && r.lengthMs >= 0 ? "物件跨度长度" : undefined}>
+                    {lenText(r.lengthMs)}
                   </span>
                   <span className="ctr">{r.hasReplay ? "✓" : "—"}</span>
                   <span

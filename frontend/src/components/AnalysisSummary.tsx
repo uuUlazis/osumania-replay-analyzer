@@ -37,6 +37,12 @@ function countsRow(counts: JudgementCounts) {
   );
 }
 
+
+export function fmtAcc(v: number | undefined | null): string {
+  return v != null && Number.isFinite(v) ? v.toFixed(2) + "%" : "—";
+}
+
+
 export default function AnalysisSummary() {
   const snap = useSyncExternalStore(sessionStore.subscribe, sessionStore.get);
   const a = snap.analysis;
@@ -55,12 +61,18 @@ export default function AnalysisSummary() {
             <div className="value" style={{ fontSize: 14 }}>{snap.replay.player}</div>
           </div>
           <div className="stat">
-            <div className="label">ACC</div>
+            <div className="label">Accuracy</div>
             <div className="value" style={{ fontSize: 14 }}>
-              {(a.rulesProfile === "v2"
-                ? a.accuracy.scoreV2
-                : a.accuracy.scoreV1).toFixed(2)}
-              %
+              {fmtAcc((a.rulesProfile ?? "v1") === "v2" ? a.accuracy?.scoreV2 : a.accuracy?.scoreV1)}
+            </div>
+          </div>
+          <div
+            className="stat"
+            title="官方公式 · lazer 移植 SR · .osr 标定 counts"
+          >
+            <div className="label">pp</div>
+            <div className="value" style={{ fontSize: 14 }}>
+              {a.pp != null && a.pp >= 0 ? a.pp.toFixed(1) : "—"}
             </div>
           </div>
           <div className="stat">
