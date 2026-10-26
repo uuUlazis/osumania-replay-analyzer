@@ -335,6 +335,16 @@ class AppWindow {
                 0) {
                 extra += envArgs;
             }
+            // 独显偏好: 用 --use-adapter-luid 把 WebView2 的 GPU 进程钉在
+            // 高性能适配器上 (进程级环境变量, 只影响本项目)。LUID 由启动时
+            // 的 DXGI 枚举写入 (见 preferDiscreteGpuEnvironment)。
+            wchar_t adapterArgs[128] = L"";
+            if (GetEnvironmentVariableW(L"MRA_GPU_ADAPTER_LUID",
+                                        adapterArgs, 128) > 0) {
+                extra += L"--use-adapter-luid=";
+                extra += adapterArgs;
+                extra += L" ";
+            }
             if (!extra.empty()) {
                 auto opts =
                     Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();

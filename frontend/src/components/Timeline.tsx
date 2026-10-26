@@ -33,40 +33,66 @@ export default function Timeline() {
     ctx.fillStyle = "#12131a";
     ctx.fillRect(0, 0, w, h);
 
-    // seconds grid
+    // seconds grid (单 path 批量 stroke, 长曲数百条线不再逐条 stroke)
     ctx.strokeStyle = "#22242f";
     const secW = (w / duration) * 1000;
     if (secW > 8) {
+      ctx.beginPath();
       for (let s = 0; s * 1000 < duration; ++s) {
         const x = ((s * 1000) / duration) * w;
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+        ctx.moveTo(x, 0); ctx.lineTo(x, h);
       }
+      ctx.stroke();
     }
 
     const xOf = (t: number) => (t / duration) * w;
     // object ticks: color + height by replay judgement (300g lowest, MISS tallest)
-    const judgeLabel = new Map<number, string>();
-    for (const e of snap.events) {
-      if (e.phase === "hold_tail") continue; // start tick shows the head judgement
-      judgeLabel.set(e.objectIndex, JUDGEMENT_BY_HIT[e.judgement] ?? "MISS");
-    }
-    for (const o of snap.objects) {
+    // 每帧开销优化: judgeLabel 按事件数组引用缓存, 物件窗口用二分定位
+    const judgeLabel = judgeLabelOf(snap.events);
+    {
+      const tLo = -2 * (duration / w);
+      const tHi = (w + 2) * (duration / w);
+      let lo = 0, hi = snap.objects.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (snap.objects[mid].startTimeMs < tLo) lo = mid + 1; else hi = mid;
+      }
+    // 判定刻度按颜色分批 (每色一条 path), LN 横线按同一透明色分批
+    const noModPath = new Path2D();
+    const lnPath = new Path2D();
+    const byColor = new Map<string, Path2D>();
+    for (let i = lo; i < snap.objects.length; ++i) {
+      const o = snap.objects[i];
+      if (o.startTimeMs > tHi) break;
       const x = xOf(o.startTimeMs);
-      if (x < -2 || x > w + 2) continue;
       const label = judgeLabel.get(o.index);
-      ctx.strokeStyle = label ? JUDGEMENT_COLORS[label] : "#6a7080";
       const bottom = label ? (JUDGEMENT_TICK_HEIGHT[label] ?? 0.7) : 0.7;
-      ctx.beginPath();
-      ctx.moveTo(x, h * 0.25);
-      ctx.lineTo(x, h * bottom);
-      ctx.stroke();
+      if (label) {
+        const color = JUDGEMENT_COLORS[label];
+        let path = byColor.get(color);
+        if (!path) { path = new Path2D(); byColor.set(color, path); }
+        path.moveTo(x, h * 0.25);
+        path.lineTo(x, h * bottom);
+      } else {
+        noModPath.moveTo(x, h * 0.25);
+        noModPath.lineTo(x, h * bottom);
+      }
       if (o.endTimeMs !== undefined) {
         const xe = xOf(o.endTimeMs);
-        ctx.strokeStyle = "rgba(160,168,190,0.35)";
-        ctx.beginPath();
-        ctx.moveTo(x, h * 0.55); ctx.lineTo(xe, h * 0.55);
-        ctx.stroke();
+        lnPath.moveTo(x, h * 0.55);
+        lnPath.lineTo(xe, h * 0.55);
       }
+    }
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(160,168,190,0.35)";
+    ctx.stroke(lnPath);
+    ctx.strokeStyle = "#6a7080";
+    ctx.stroke(noModPath);
+    for (const [color, path] of byColor) {
+      ctx.strokeStyle = color;
+      ctx.stroke(path);
+    }
+    ctx.lineWidth = 1;
     }
     // selection overlay (normalize so reverse drags draw correctly)
     if (player.selection) {
@@ -84,6 +110,25 @@ export default function Timeline() {
     ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, h); ctx.stroke();
     ctx.lineWidth = 1;
   }, [snap.objects, snap.events, player.previewTimeMs, player.durationMs, player.selection]);
+
+// Timeline 判定标签缓存 (数组引用键)
+const timelineLabelCache = new WeakMap<object, Map<number, string>>();
+function judgeLabelOf(events: object): Map<number, string> {
+  const cached = timelineLabelCache.get(events);
+  if (cached) return cached;
+  const map = new Map<number, string>();
+  const list = events as unknown as {
+    phase: string;
+    objectIndex: number;
+    judgement: string;
+  }[];
+  for (const e of list) {
+    if (e.phase === "hold_tail") continue; // start tick shows the head judgement
+    map.set(e.objectIndex, JUDGEMENT_BY_HIT[e.judgement] ?? "MISS");
+  }
+  timelineLabelCache.set(events, map);
+  return map;
+}
 
   const dragRef = useRef<{
     pointerId: number;

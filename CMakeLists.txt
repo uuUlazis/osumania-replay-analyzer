@@ -64,7 +64,7 @@ set(MRA_CORE_SOURCES
 add_library(mra_core STATIC ${MRA_CORE_SOURCES})
 target_include_directories(mra_core
     PUBLIC ${MRA_BACKEND}/src ${MRA_BACKEND}/third_party ${MRA_GENERATED})
-target_link_libraries(mra_core PUBLIC mra_lzma)
+target_link_libraries(mra_core PUBLIC mra_lzma dxgi)
 
 # ---- WebView2 (optional static linkage) ----
 set(MRA_WEBVIEW2_DIR ${MRA_BACKEND}/third_party/webview2)

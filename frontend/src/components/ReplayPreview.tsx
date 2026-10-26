@@ -1,143 +1,128 @@
 // Replay preview: downscroll playfield rendered from the same matcher
 // data, with skin layout/images from the loaded skin folder.
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+//
+// 渲染架构 (2026-10-26 性能定案): 播放时 AudioSync 的 rAF 跟随环每帧更新
+// playerStore; 若经 useSyncExternalStore 驱动 React 提交, 高刷屏上每秒
+// 数百次 React 提交会造成周期性 GC/提交停顿 (实测 25-50ms 长帧, 1 次/秒)。
+// 因此本组件不订阅 playerStore: 自己跑 rAF 循环直读 playerStore.get()/
+// sessionStore.get() 绘制 (无 React 提交, 跟随显示器刷新率)。
+// 帧数限制已证伪 (2026-10-27 用户实测: rAF 跳拍与定时器定频两种方案卡顿
+// 均回归) — 不做任何限频, 回退为限频前 (11o-c 验收版) 的自由 rAF。
+// playerStore 的 emit 降频 (~30Hz) 供 Transport/时间轴等文本 UI 使用。
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { sessionStore } from "../app/sessionStore";
 import { playerStore } from "../app/playerStore";
 import { drawPlayfield } from "../render/maniaRenderer";
 import { loadManiaSkin, visibleTimeMs, type ManiaSkin } from "../render/maniaSkin";
+import type { ManiaObject } from "../models/types";
 
 export default function ReplayPreview() {
   const snap = useSyncExternalStore(sessionStore.subscribe, sessionStore.get);
-  const player = useSyncExternalStore(playerStore.subscribe, playerStore.get);
+  // 皮肤经 ref 桥接给 rAF 循环 (循环仅会话级重建)
+  const skinRef = useRef<ManiaSkin | null>(null);
+  // 只订阅 skinRev (数值快照): 皮肤热重载时重建渲染循环, 其余 player 更新
+  // 由 rAF 循环直读 store, 不触发 React 提交
+  const skinRev = useSyncExternalStore(
+    playerStore.subscribe,
+    () => playerStore.get().skinRev,
+  );
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [skin, setSkin] = useState<ManiaSkin | null>(null);
   const keyCount = snap.beatmap?.keyCount ?? 4;
-  // 判定数据源跟随本次分析使用的规则档 (snap.analysis 可为 null → 回退 V1);
-  // lazer 局 rulesProfile 恒为 v2 (matchV2 = lazer 判定 profile 重建)。
   const judgeVersion = snap.analysis?.rulesProfile === "v2" ? "v2" : "v1";
-  // 渲染分流开关: stable 与 lazer 的判定/皮肤渲染逻辑不同 (如 stable V2
-  // 的尾端色带 lazer 不画), 互不渗漏。
   const isLazer = snap.analysis?.scoreSource === "lazer";
-
-  // visible time window from scroll speed (notes spawn above the field)
-  // 落速补偿: rate≠1 时谱面时间以 rate×墙钟前进, 窗口按 rate 放大保持屏幕落速
-  // 与原速 (NM) 一致 (用户定案: DT 落速与原速一致, stable 不因 DT 加快下落)。
-  const windowMs = useMemo(
-    () => (visibleTimeMs(player.scrollSpeed) + 300) * (player.rate || 1),
-    [player.scrollSpeed, player.rate],
-  );
-
-  const sid = snap.sessionId;
 
   // skin loads once per session (ini + per-column images)
   useEffect(() => {
     let cancelled = false;
     setSkin(null);
-    if (sid) {
-      loadManiaSkin(sid, keyCount).then((loaded) => {
-        if (!cancelled) setSkin(loaded);
+    skinRef.current = null;
+    if (snap.sessionId) {
+      loadManiaSkin(snap.sessionId, keyCount).then((loaded) => {
+        if (!cancelled) {
+          skinRef.current = loaded;
+          setSkin(loaded);
+        }
       });
     }
     return () => { cancelled = true; };
-  }, [sid, keyCount, player.skinRev]);
+  }, [snap.sessionId, keyCount, skinRev]);
 
-  // Longest hold span in the map: LNs starting this long before the preview
-  // time can still be on screen (their tail has not passed the line yet).
-  const maxHoldMs = useMemo(() => {
-    let m = 0;
-    for (const o of snap.objects) {
-      if (o.endTimeMs) {
-        const d = o.endTimeMs - o.startTimeMs;
-        if (d > m) m = d;
-      }
-    }
-    return m;
-  }, [snap.objects]);
-
-  // visible objects window: binary search on the START-time-sorted objects.
-  // The previous version binary-searched endTimeMs, but the array is sorted
-  // by startTimeMs — with long holds the end times are not monotonic, so the
-  // search could jump past a hold that was still visible and make whole LNs
-  // vanish frame-to-frame while they were still mid-screen.
-  const visible = useMemo(() => {
-    const t = player.previewTimeMs;
-    const objs = snap.objects;
-    if (!objs.length) return [];
-    const lead = 800 + maxHoldMs;
-    let lo = 0, hi = objs.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (objs[mid].startTimeMs < t - lead) lo = mid + 1; else hi = mid;
-    }
-    const out = [];
-    for (let i = lo; i < objs.length && objs[i].startTimeMs - t <= windowMs; ++i) {
-      const o = objs[i];
-      const endT = o.endTimeMs ?? o.startTimeMs;
-      if (endT - t >= -800) out.push(o);
-    }
-    return out;
-  }, [snap.objects, player.previewTimeMs, windowMs, maxHoldMs]);
-
+  // ---- 独立 rAF 渲染循环: 不经 React, 每帧直读 store ----
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
-    const needW = Math.round(rect.width * dpr);
-    const needH = Math.round(rect.height * dpr);
-    if (canvas.width !== needW || canvas.height !== needH) {
-      canvas.width = needW;
-      canvas.height = needH;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    // key state at playhead: last frame with timeMs <= previewTimeMs
-    const frames = snap.frames;
-    let keys = 0;
-    if (frames.length && player.previewTimeMs >= frames[0].timeMs) {
-      let lo2 = 0, hi2 = frames.length - 1;
-      const t = player.previewTimeMs;
-      while (lo2 < hi2) {
-        const mid = (lo2 + hi2 + 1) >> 1;
-        if (frames[mid].timeMs <= t) lo2 = mid; else hi2 = mid - 1;
+    let raf = 0;
+    let alive = true;
+    const loop = () => {
+      if (!alive) return;
+      raf = requestAnimationFrame(loop);
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) return;
+      const needW = Math.round(rect.width * dpr);
+      const needH = Math.round(rect.height * dpr);
+      if (canvas.width !== needW || canvas.height !== needH) {
+        canvas.width = needW;
+        canvas.height = needH;
       }
-      keys = frames[lo2].keys;
-    }
-    const ks: boolean[] = [];
-    for (let c = 0; c < keyCount; ++c) ks.push((keys & (1 << c)) !== 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // 皮肤未就绪 (会话已载入): 渲染完全静止 — 不画默认配色/背景/判定线,
-    // 由灰屏遮罩接管; 皮肤到位后本 effect 因依赖变化重跑, 直接以皮肤绘制。
-    if (sid && !skin) return;
+      const st = playerStore.get();
+      const s2 = sessionStore.get();
 
-    // 判定规则 V2 draws the ScoreV2 match (falls back to V1 events when the
-    // session predates the second pass).
-    const events =
-      judgeVersion === "v2" && snap.eventsV2.length
-        ? snap.eventsV2
-        : snap.events;
-    drawPlayfield(ctx, rect.width, rect.height, {
-      previewTimeMs: player.previewTimeMs,
-      objects: visible,
-      events,
-      keyState: ks,
-      skin,
-      scrollSpeed: player.scrollSpeed,
-      windowMs,
-      rate: player.rate,
-      showInputJudges: player.showInputJudges,
-      judgeVersion,
-      lazerMode: isLazer,
-    });
-  }, [visible, snap.events, snap.eventsV2, snap.frames, player.previewTimeMs, keyCount, player.scrollSpeed, windowMs, player.rate, snap.sessionId, skin, player.showInputJudges, judgeVersion, isLazer]);
+      // key state at playhead: last frame with timeMs <= previewTimeMs
+      const frames = s2.frames;
+      let keys = 0;
+      const t = st.previewTimeMs;
+      if (frames.length && t >= frames[0].timeMs) {
+        let lo2 = 0, hi2 = frames.length - 1;
+        while (lo2 < hi2) {
+          const mid = (lo2 + hi2 + 1) >> 1;
+          if (frames[mid].timeMs <= t) lo2 = mid; else hi2 = mid - 1;
+        }
+        keys = frames[lo2].keys;
+      }
+      const ks: boolean[] = [];
+      const keyCount2 = s2.beatmap?.keyCount ?? keyCount;
+      for (let c = 0; c < keyCount2; ++c) ks.push((keys & (1 << c)) !== 0);
+
+      const judgeVersion2 =
+        s2.analysis?.rulesProfile === "v2" ? "v2" : "v1";
+      const isLazer2 = s2.analysis?.scoreSource === "lazer";
+      const events =
+        judgeVersion2 === "v2" && s2.eventsV2.length ? s2.eventsV2 : s2.events;
+
+      // 皮肤未就绪 (会话已载入): 不画, 由灰屏遮罩接管
+      if (s2.sessionId && !skinRef.current) return;
+
+      drawPlayfield(ctx, rect.width, rect.height, {
+        previewTimeMs: t,
+        objects: objsWindow(s2, t, windowMsOf(st)),
+        events,
+        keyState: ks,
+        skin: skinRef.current,
+        scrollSpeed: st.scrollSpeed,
+        windowMs: windowMsOf(st),
+        rate: st.rate || 1,
+        showInputJudges: st.showInputJudges,
+        judgeVersion: judgeVersion2,
+        lazerMode: isLazer2,
+      });
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+    };
+  }, [snap.sessionId, keyCount, skinRev, isLazer, judgeVersion, skin]);
 
   return (
     <div className="preview-wrap">
       <canvas ref={canvasRef} className="preview-canvas" />
-      {sid && !skin && (
+      {snap.sessionId && !skin && (
         <div className="preview-loading">
           <div className="preview-spinner" />
           正在载入皮肤…
@@ -145,4 +130,37 @@ export default function ReplayPreview() {
       )}
     </div>
   );
+}
+function objsWindow(
+  s2: { objects: ManiaObject[] },
+  t: number,
+  windowMs: number,
+): ManiaObject[] {
+  const objs = s2.objects;
+  if (!objs.length) return [];
+  let maxHold = 0;
+  for (const o of objs) {
+    if (o.endTimeMs) {
+      const d = o.endTimeMs - o.startTimeMs;
+      if (d > maxHold) maxHold = d;
+    }
+  }
+  const lead = 800 + maxHold;
+  let lo = 0, hi = objs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (objs[mid].startTimeMs < t - lead) lo = mid + 1; else hi = mid;
+  }
+  const out: ManiaObject[] = [];
+  for (let i = lo; i < objs.length && objs[i].startTimeMs - t <= windowMs; ++i) {
+    const o = objs[i];
+    const endT = o.endTimeMs ?? o.startTimeMs;
+    if (endT - t >= -800) out.push(o);
+  }
+  return out;
+}
+
+
+function windowMsOf(st: { scrollSpeed: number; rate: number }): number {
+  return (visibleTimeMs(st.scrollSpeed) + 300) * (st.rate || 1);
 }

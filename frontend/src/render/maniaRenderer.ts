@@ -43,6 +43,55 @@ export interface DrawOptions {
   lazerMode?: boolean;
 }
 
+// 每帧开销优化: drawPlayfield 每帧都会被调用 (播放时 ~60fps), 而事件数组
+// 可达数万条。事件索引 (头尾映射 + 按时间排序副本) 按数组引用用 WeakMap
+// 缓存, 只在事件数组变化时重建一次; 每帧的时间窗口裁剪用二分查找。
+interface EventIndex {
+  headByObject: Map<number, RenderEvents>;
+  tailByObject: Map<number, RenderEvents>;
+  byObjectTime: RenderEvents[];
+  byDisplayTime: RenderEvents[];
+}
+const eventIndexCache = new WeakMap<RenderEvents[], EventIndex>();
+function displayTimeOf(e: RenderEvents): number {
+  return e.actualTimeMs ?? e.objectTimeMs;
+}
+function eventIndexOf(events: RenderEvents[]): EventIndex {
+  const cached = eventIndexCache.get(events);
+  if (cached) return cached;
+  const headByObject = new Map<number, RenderEvents>();
+  const tailByObject = new Map<number, RenderEvents>();
+  for (const e of events) {
+    if (e.objectIndex === undefined) continue;
+    if (e.phase === "hold_tail") tailByObject.set(e.objectIndex, e);
+    else if (!headByObject.has(e.objectIndex))
+      headByObject.set(e.objectIndex, e);
+  }
+  const byObjectTime = [...events].sort(
+    (a, b) => a.objectTimeMs - b.objectTimeMs,
+  );
+  const byDisplayTime = [...events].sort(
+    (a, b) => displayTimeOf(a) - displayTimeOf(b),
+  );
+  const idx = { headByObject, tailByObject, byObjectTime, byDisplayTime };
+  eventIndexCache.set(events, idx);
+  return idx;
+}
+function lowerBoundBy<T>(
+  arr: T[],
+  time: number,
+  getTime: (x: T) => number,
+): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (getTime(arr[mid]) < time) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 export function drawPlayfield(
   ctx: CanvasRenderingContext2D,
   canvasWidth: number,
@@ -117,13 +166,19 @@ export function drawPlayfield(
   // steady light; each hit fires a bright osu-style hit lighting burst
   // (420 ms ease-out) with a white-hot core at the judgement line.
   const flash = new Array<number>(skinKeys).fill(0);
-  for (const e of events) {
-    const dt = t - e.objectTimeMs;
-    if (dt < 0 || dt > 420) continue;
-    const f = 1 - dt / 420;
-    const eased = f * f * (3 - 2 * f);
-    if (e.column >= 0 && e.column < skinKeys && eased > flash[e.column])
-      flash[e.column] = eased;
+  {
+    const eidx = eventIndexOf(events);
+    let i = lowerBoundBy(eidx.byObjectTime, t - 420, (e) => e.objectTimeMs);
+    for (; i < eidx.byObjectTime.length; ++i) {
+      const e = eidx.byObjectTime[i];
+      const dt = t - e.objectTimeMs;
+      if (dt > 420) break;
+      if (dt < 0) continue;
+      const f = 1 - dt / 420;
+      const eased = f * f * (3 - 2 * f);
+      if (e.column >= 0 && e.column < skinKeys && eased > flash[e.column])
+        flash[e.column] = eased;
+    }
   }
   if (skin?.stageLight && !skin.stageLightBlank) {
     for (let c = 0; c < skinKeys; ++c) {
@@ -177,13 +232,9 @@ export function drawPlayfield(
   // Outlines stay strictly inside the column (inset rects) so they never
   // bleed into the neighbouring track when columnspacing is 0.
   if (showInputJudges) {
-    const headByObject = new Map<number, RenderEvents>();
-    const tailByObject = new Map<number, RenderEvents>();
-    for (const e of events) {
-      if (e.objectIndex === undefined) continue;
-      if (e.phase === "hold_tail") tailByObject.set(e.objectIndex, e);
-      else if (!headByObject.has(e.objectIndex)) headByObject.set(e.objectIndex, e);
-    }
+    const eidx = eventIndexOf(events);
+    const headByObject = eidx.headByObject;
+    const tailByObject = eidx.tailByObject;
     ctx.lineWidth = 1.4;
     ctx.globalAlpha = 0.92;
     for (const o of objects) {
@@ -199,15 +250,9 @@ export function drawPlayfield(
       const h = Math.max(2, bottom - top);
       if (judgeVersion === "v2") {
         // V2: head keeps its own outline; the tail is judged separately at
-        // release, shown as a thin ring at the tail end of the LN (outline
-        // only, no filled band). lazer 局不画尾端色环 (无该渲染语义, 其尾
-        // 判定走松键 tick)。
+        // release. 尾端的 8px 判定色带矩形已按用户反馈移除 (长条只保留描边)。
         ctx.strokeStyle = judgeColor(e.judgement);
         ctx.strokeRect(x + 1, top, cw - 2, h);
-        if (isHold && te && !lazerMode) {
-          ctx.strokeStyle = judgeColor(te.judgement);
-          ctx.strokeRect(x + 1, top, cw - 2, Math.min(8, h));
-        }
       } else {
         // V1 (stable): the whole LN shares one combined judgement — the
         // hold's colour once released, the head input's colour before.
@@ -217,19 +262,28 @@ export function drawPlayfield(
       }
     }
     ctx.globalAlpha = 1;
-    for (const e of events) {
-      if (e.column < 0 || e.column >= skinKeys) continue;
-      const y = yOf(e.actualTimeMs ?? e.objectTimeMs);
-      if (y < -4 || y > hitY + 4) continue;
-      const x = columnX(skin, stageLeft, stageWidth, skinKeys, e.column);
-      const cw = columnW(skin, stageWidth, skinKeys, e.column);
-      // V1 hold tails tick in the combined whole-LN judgement colour
-      const tick =
-        judgeVersion === "v1" && e.phase === "hold_tail" && e.v1Judgement
-          ? e.v1Judgement
-          : e.judgement;
-      ctx.fillStyle = judgeColor(tick);
-      ctx.fillRect(x + cw * 0.18, y - 1.6, cw * 0.64, 3.2);
+    // tick 窗口: y ∈ [-4, hitY+4] 对应的时间区间, 二分定位后顺序遍历
+    {
+      const eidx = eventIndexOf(events);
+      const loMs = t - 4 / pxPerMs;
+      const hiMs = t + (hitY + 4) / pxPerMs;
+      let i = lowerBoundBy(eidx.byDisplayTime, loMs, displayTimeOf);
+      for (; i < eidx.byDisplayTime.length; ++i) {
+        const e = eidx.byDisplayTime[i];
+        const dtime = displayTimeOf(e);
+        if (dtime > hiMs) break;
+        if (e.column < 0 || e.column >= skinKeys) continue;
+        const y = yOf(dtime);
+        const x = columnX(skin, stageLeft, stageWidth, skinKeys, e.column);
+        const cw = columnW(skin, stageWidth, skinKeys, e.column);
+        // V1 hold tails tick in the combined whole-LN judgement colour
+        const tick =
+          judgeVersion === "v1" && e.phase === "hold_tail" && e.v1Judgement
+            ? e.v1Judgement
+            : e.judgement;
+        ctx.fillStyle = judgeColor(tick);
+        ctx.fillRect(x + cw * 0.18, y - 1.6, cw * 0.64, 3.2);
+      }
     }
   }
 

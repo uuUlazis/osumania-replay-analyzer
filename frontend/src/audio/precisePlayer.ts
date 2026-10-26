@@ -113,7 +113,10 @@ export class PreciseAudioPlayer {
     this.playingFlag = false;
   }
 
+  seekCount = 0;  // 诊断: follow 环重启音频源的次数 (应为 0 或个位数)
+
   seek(sec: number): void {
+    this.seekCount += 1;
     const t = Math.max(0, Math.min(sec, this.buffer ? this.buffer.duration : 0));
     if (this.playingFlag) void this.play(t);
     else this.offset = t;
