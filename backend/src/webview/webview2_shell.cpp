@@ -31,28 +31,29 @@ std::wstring exeDirectory() {
     return dir.substr(0, slash);
 }
 
-std::wstring localAppDataDir() {
-    wchar_t buffer[MAX_PATH]{};
-    if (SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr,
-                         SHGFP_TYPE_CURRENT, buffer) != S_OK) {
-        return {};
-    }
-    return std::wstring(buffer);
-}
-
 // All mutable runtime state (WebView2 user-data dir, log, attempt-state
-// file) lives under %LOCALAPPDATA%\\ManiaReplayAnalyzer so the distributed
-// single exe never writes anything next to itself. %TEMP% is the fallback
-// when the profile directory cannot be resolved.
+// file) lives under <exe dir>\_data (用户约定: 应用数据不进用户目录, 且
+// _data 不进 git)。%TEMP% 是 exe 目录不可写时的回退。
 std::wstring runtimeBaseDir() {
-    std::wstring base = localAppDataDir();
-    if (base.empty()) {
-        wchar_t temp[MAX_PATH]{};
-        if (GetTempPathW(MAX_PATH, temp) == 0) return {};
-        base = temp;
-        while (!base.empty() && (base.back() == L'\\' || base.back() == L'/'))
-            base.pop_back();
+    wchar_t exeBuf[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, exeBuf, MAX_PATH) != 0) {
+        std::wstring dir(exeBuf);
+        const size_t slash = dir.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            dir = dir.substr(0, slash) + L"\\_data";
+            ::CreateDirectoryW(dir.c_str(), nullptr);
+            const DWORD attr = GetFileAttributesW(dir.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES &&
+                (attr & FILE_ATTRIBUTE_DIRECTORY))
+                return dir;
+        }
     }
+    // exe 目录不可写 (Program Files 等只读位置) → %TEMP% 回退
+    wchar_t temp[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, temp) == 0) return {};
+    std::wstring base = temp;
+    while (!base.empty() && (base.back() == L'\\' || base.back() == L'/'))
+        base.pop_back();
     std::wstring dir = base + L"\\ManiaReplayAnalyzer";
     ::CreateDirectoryW(dir.c_str(), nullptr);
     return dir;

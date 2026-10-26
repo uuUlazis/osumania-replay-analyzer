@@ -15,7 +15,9 @@ struct DialogFilter {
 // Returns nullopt when the user cancels or COM fails.
 std::optional<std::string> openFileDialog(const std::wstring& title,
                                           const std::vector<DialogFilter>& filters);
-std::optional<std::string> openFolderDialog(const std::wstring& title);
+// initialDir non-empty -> the dialog opens at that folder (上次位置).
+std::optional<std::string> openFolderDialog(const std::wstring& title,
+                                            const std::wstring& initialDir = L"");
 
 // Converts a UTF-16 Win32 path to UTF-8 std::string.
 std::string wideToUtf8(const std::wstring& w);

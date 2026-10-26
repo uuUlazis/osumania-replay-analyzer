@@ -5,6 +5,12 @@
 // seconds and the error grew with position — that was the preview/music
 // desync. osu! decodes frames exactly (BASS), which is why the same songs
 // always synced there.
+//
+// rate mod 变速不变调 (stable DT/NC 均不变调, BASS_FX tempo 语义):
+// load(url, timeStretch=rate) 时对 buffer 做离线 WSOLA 时间处理, 之后以
+// playbackRate=1 播放 (音高保持)。此时 buffer 时间 ≠ 谱面时间:
+// 谱面ms = buffer秒 × timeBase × 1000 (timeBase = timeStretch), AudioSync
+// 的换算用 timeBase; 未拉伸 (rate=1) 时 timeBase=1, 换算恒等。
 export class PreciseAudioPlayer {
   private ctx: AudioContext | null = null;
   private gain: GainNode | null = null;
@@ -17,6 +23,11 @@ export class PreciseAudioPlayer {
   private volumeValue = 1;
   private rateValue = 1;
   private srcRate = 1;
+  // 拉伸后 buffer 的时间基数 (谱面ms = buffer秒 × timeBase × 1000); 1 = 未拉伸
+  private timeBase = 1;
+  // load 代际号: 并发/过期 load (NC→非 NC 时 nightcore 翻转先触发旧 URL
+  // 重解码、musicUrl 再触发新 URL) 后完成者不得覆盖新歌 buffer
+  private loadSeq = 0;
   onEnded: (() => void) | null = null;
 
   get ready(): boolean { return this.buffer !== null; }
@@ -30,12 +41,16 @@ export class PreciseAudioPlayer {
       this.startOffset + (this.ctx.currentTime - this.startedAt) * this.srcRate);
   }
 
-  async load(url: string): Promise<void> {
+  // timeStretch ≠ 1: 解码后离线 WSOLA 处理 buffer, 播放速率锁 1, timeBase 生效
+  async load(url: string, timeStretch = 1): Promise<void> {
+    const seq = ++this.loadSeq;
     this.stopSource();
     this.playingFlag = false;
     this.offset = 0;
     this.buffer = null;
+    this.timeBase = Math.abs(timeStretch - 1) > 0.001 ? timeStretch : 1;
     const res = await fetch(url);
+    if (seq !== this.loadSeq) return; // 已被更新的 load 取代
     if (!res.ok) throw new Error("audio http " + res.status);
     const bytes = await res.arrayBuffer();
     if (!this.ctx) {
@@ -47,7 +62,17 @@ export class PreciseAudioPlayer {
       this.gain.gain.value = this.volumeValue;
       this.gain.connect(this.ctx.destination);
     }
-    this.buffer = await this.ctx.decodeAudioData(bytes);
+    const decoded = await this.ctx.decodeAudioData(bytes);
+    if (seq !== this.loadSeq) return; // 过期: 不覆盖新歌 buffer
+    let buffer = decoded;
+    if (this.timeBase !== 1) {
+      const { wsolaStretchBuffer } = await import("./wsola");
+      const stretched = await wsolaStretchBuffer(
+        this.ctx, buffer, this.timeBase);
+      if (seq !== this.loadSeq) return;
+      buffer = stretched;
+    }
+    this.buffer = buffer;
   }
 
   async play(fromSec?: number): Promise<void> {
@@ -71,8 +96,9 @@ export class PreciseAudioPlayer {
         this.onEnded?.();
       }
     };
-    src.playbackRate.value = this.rateValue;
-    this.srcRate = this.rateValue;
+    // 拉伸 buffer: tempo 已编码进 buffer, 播放速率恒 1 (音高保持)
+    src.playbackRate.value = this.timeBase !== 1 ? 1 : this.rateValue;
+    this.srcRate = src.playbackRate.value;
     src.start(0, at);
     this.source = src;
     this.startedAt = this.ctx.currentTime;
@@ -98,10 +124,16 @@ export class PreciseAudioPlayer {
     if (this.gain) this.gain.gain.value = v;
   }
 
-  // Changing the rate mid-play restarts the source at the current position so
-  // the position mapping stays consistent with the new srcRate.
+  get timeBaseValue(): number { return this.timeBase; }
+
+  // 拉伸模式下 tempo 在 buffer 里, setRate 只换时间基数不重启源 (rate 变更
+  // 需重新 load — 会话切换本来就换 musicUrl)
   setRate(r: number): void {
     const clamped = Math.min(4, Math.max(0.25, r));
+    if (this.timeBase !== 1) {
+      this.rateValue = clamped;
+      return;
+    }
     if (clamped === this.rateValue) return;
     if (this.playingFlag) {
       const cur = this.currentTime;

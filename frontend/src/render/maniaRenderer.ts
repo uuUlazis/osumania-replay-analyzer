@@ -30,11 +30,17 @@ export interface DrawOptions {
   skin: ManiaSkin | null;
   scrollSpeed: number;
   windowMs: number;
+  // rate mod 倍率 (DT/NC 1.5, HT 0.75): 谱面时间以 rate×墙钟前进, 落速换算按
+  // rate 放大可视窗保持屏幕落速与原速一致 (用户定案; 1 = NM)
+  rate?: number;
   // replay input/judgement overlay (dotted column guides + coloured ticks)
   showInputJudges?: boolean;
   // judgement rule the overlay reflects: stable V1 (LN = one judgement) or
   // ScoreV2 (LN tail judged separately, band at the tail end)
   judgeVersion?: "v1" | "v2";
+  // 渲染分流开关: lazer 与 stable 的判定/皮肤渲染逻辑不同 (stable V2 的
+  // 尾端色带 lazer 不画; 后续 lazer 皮肤差异也挂在这条分流上)。
+  lazerMode?: boolean;
 }
 
 export function drawPlayfield(
@@ -43,7 +49,7 @@ export function drawPlayfield(
   canvasHeight: number,
   opts: DrawOptions,
 ) {
-  const { previewTimeMs: t, objects, events, keyState, skin, windowMs, showInputJudges, judgeVersion = "v1" } = opts;
+  const { previewTimeMs: t, objects, events, keyState, skin, windowMs, showInputJudges, judgeVersion = "v1", lazerMode = false } = opts;
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
   ctx.fillStyle = "#0b0c12";
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
@@ -59,7 +65,7 @@ export function drawPlayfield(
   const stageLeft = skin ? skin.stageLeft : stageLeftDefault(skinKeys);
   const stageWidth = skin ? skin.stageRight - skin.stageLeft : stageWidthDefault(skinKeys);
   const hitY = skin ? skin.hitPosition : 402;
-  const T = visibleTimeMs(opts.scrollSpeed);
+  const T = visibleTimeMs(opts.scrollSpeed) * (opts.rate ?? 1);
   const pxPerMs = hitY / T;
 
   const yOf = (objTime: number) => hitY - (objTime - t) * pxPerMs;
@@ -161,7 +167,7 @@ export function drawPlayfield(
     if (o.type === "note") {
       drawNoteSprite(ctx, skin, o.column, x, cw, yOf(o.startTimeMs));
     } else {
-      drawHoldSprite(ctx, skin, o.column, x, cw, yOf(o.startTimeMs), yOf(endT));
+      drawHoldSprite(ctx, skin, o.column, x, cw, yOf(o.startTimeMs), yOf(endT), lazerMode);
     }
   }
 
@@ -194,10 +200,11 @@ export function drawPlayfield(
       if (judgeVersion === "v2") {
         // V2: head keeps its own outline; the tail is judged separately at
         // release, shown as a thin ring at the tail end of the LN (outline
-        // only, no filled band).
+        // only, no filled band). lazer 局不画尾端色环 (无该渲染语义, 其尾
+        // 判定走松键 tick)。
         ctx.strokeStyle = judgeColor(e.judgement);
         ctx.strokeRect(x + 1, top, cw - 2, h);
-        if (isHold && te) {
+        if (isHold && te && !lazerMode) {
           ctx.strokeStyle = judgeColor(te.judgement);
           ctx.strokeRect(x + 1, top, cw - 2, Math.min(8, h));
         }
@@ -339,6 +346,7 @@ function drawHoldSprite(
   cw: number,
   headBottom: number,
   tailBottom: number,
+  lazerMode: boolean,
 ) {
   const c = skin?.columns[col];
   // Fall back along tail -> head -> note and skip elements whose image did
@@ -367,23 +375,53 @@ function drawHoldSprite(
   if (headH > capH) headH = capH;
   if (tailH > capH) tailH = capH;
 
-  // body between the head/tail sprites
-  const bodyTop = spanTop + tailH;
-  const bodyBottom = spanBottom - headH;
+  // stable 的 LN 体覆盖整个 head..tail 跨度 (ManiaHitObjectManager 将
+  // BodySprite 从 StartTime 铺到 EndTime), head/tail 贴图后画、盖在体上;
+  // lazer 同为整段。之前按 head/tail 高度内缩会留缝并改变体形。
+  const bodyTop = spanTop;
+  const bodyBottom = spanBottom;
   if (bodyBottom - bodyTop > 0.5) {
     if (body && body.img) {
-      const natAspect = body.img.naturalHeight / body.img.naturalWidth;
-      const tileH = cw * natAspect;
-      if (tileH >= bodyBottom - bodyTop) {
-        // crop the top segment of the body texture
-        const frac = (bodyBottom - bodyTop) / tileH;
-        ctx.drawImage(
-          body.img,
-          0, 0, body.img.naturalWidth, body.img.naturalHeight * frac,
-          x, bodyTop, cw, bodyBottom - bodyTop,
-        );
-      } else {
+      if (lazerMode) {
+        // lazer: 官方渲染为整段拉伸 (body 一次性覆盖 head..tail)
         ctx.drawImage(body.img, x, bodyTop, cw, bodyBottom - bodyTop);
+      } else {
+        // stable (IL 权威, ManiaHitObjectManager LN 布局段):
+        // - stretch (Version<2.5 强制, 或 NoteBodyStyle:0): 整张纹理一次
+        //   拉伸到整段 (scaleY *= span/纹理高) —— 长条圆头被纵向拉尖,
+        //   即游戏内观感。
+        // - Repeat* (v2.5+ 缺省 repeatBottom): 体沿整段平铺, 纵向用固定
+        //   标尺 "1 纹理像素 = 1/1.6 播放区单位" (768 空间 1:1 采样, 与列
+        //   宽无关), 横向仍按列宽缩放; 相位: repeatBottom=纹理顶行对齐体
+        //   顶部 (尾端), repeatTop=对齐体底部 (首端), repeatTopAndBottom=
+        //   居中。之前按列宽等比平铺 (tileH=cw·H/W) 与该固定标尺不一致,
+        //   巨型体纹理 (如 152×80030 的 LNTail) 的圆头会被压扁, 视觉上
+        //   "不够尖" —— 即本次修复的 stable 渲染差异。
+        const style = c?.bodyStyle ?? "repeatBottom";
+        const texW = body.img.naturalWidth;
+        const texH = body.img.naturalHeight;
+        if (style === "stretch") {
+          ctx.drawImage(body.img, x, bodyTop, cw, bodyBottom - bodyTop);
+        } else {
+          const px = 1 / 1.6; // 纹理像素 → 播放区单位的固定纵向标尺
+          const spanPx = (bodyBottom - bodyTop) / px; // 整段折合的纹理像素数
+          const mod = (a: number, m: number) => ((a % m) + m) % m;
+          let row = 0;
+          if (style === "repeatTop") row = mod(texH - spanPx, texH);
+          else if (style === "repeatTopBottom") row = mod((texH - spanPx) / 2, texH);
+          let y = bodyTop;
+          while (y < bodyBottom - 0.5) {
+            const h = Math.min((texH - row) * px, bodyBottom - y);
+            if (h <= 0) break;
+            ctx.drawImage(
+              body.img,
+              0, row, texW, Math.min(texH - row, h / px),
+              x, y, cw, h,
+            );
+            y += h;
+            row = 0;
+          }
+        }
       }
     } else {
       const color: SkinColor = c?.light ?? FALLBACK_COLORS[col % FALLBACK_COLORS.length];
@@ -392,18 +430,19 @@ function drawHoldSprite(
     }
   }
 
-  // tail sprite at the END position (bottom edge on it); v2.5+ skins flip
-  // the tail texture vertically (NoteFlipWhenUpsideDown default on).
+  // tail sprite at the END position, INSIDE the body span (贴在 LN 尾端体内;
+  // 之前画在 spanTop - tailH 会悬浮在体外, 视觉上"多出一段")。v2.5+ skins
+  // flip the tail texture vertically (NoteFlipWhenUpsideDown default on).
   if (tail?.img) {
     const flip = !skin || skin.version >= 2.5;
     if (flip) {
       ctx.save();
-      ctx.translate(0, 2 * spanTop);
+      ctx.translate(0, 2 * (spanTop + tailH));
       ctx.scale(1, -1);
-      ctx.drawImage(tail.img, x - 0.5, spanTop - tailH, cw + 1, tailH);
+      ctx.drawImage(tail.img, x - 0.5, spanTop, cw + 1, tailH);
       ctx.restore();
     } else {
-      ctx.drawImage(tail.img, x - 0.5, spanTop - tailH, cw + 1, tailH);
+      ctx.drawImage(tail.img, x - 0.5, spanTop, cw + 1, tailH);
     }
   }
   // head sprite at the START position (bottom edge on it)

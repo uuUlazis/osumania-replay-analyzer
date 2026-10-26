@@ -39,9 +39,12 @@ set(MRA_CORE_SOURCES
     ${MRA_BACKEND}/src/http/api_server.cpp
     ${MRA_BACKEND}/src/io/md5.cpp
     ${MRA_BACKEND}/src/io/paths.cpp
+    ${MRA_BACKEND}/src/lazer/lazer_format.cpp
+    ${MRA_BACKEND}/src/lazer/lazer_scan.cpp
     ${MRA_BACKEND}/src/mania/analysis.cpp
     ${MRA_BACKEND}/src/mania/accuracy.cpp
     ${MRA_BACKEND}/src/mania/hit_matcher.cpp
+    ${MRA_BACKEND}/src/mania/lazer_matcher.cpp
     ${MRA_BACKEND}/src/mania/score_record.cpp
     ${MRA_BACKEND}/src/mania/source_engine.cpp
     ${MRA_BACKEND}/src/mania/official_sr.cpp
@@ -91,6 +94,10 @@ set_target_properties(ManiaReplayAnalyzer PROPERTIES
 add_executable(mra_tests
     ${MRA_BACKEND}/tests/test_mania_core.cpp)
 target_link_libraries(mra_tests PRIVATE mra_core)
+# E2E fixture data lives inside the version snapshot (root fixtures/ removed
+# 2026-10-25) — compile-time absolute dir, same pattern as MRA_SR_FIXTURE_DIR.
+target_compile_definitions(mra_tests PRIVATE
+    MRA_E2E_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 set_target_properties(mra_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -109,13 +116,46 @@ add_custom_target(run_tests
     COMMAND ${CMAKE_BINARY_DIR}/bin/mra_tests
     COMMAND ${CMAKE_BINARY_DIR}/bin/mra_tests_star_rating
     COMMAND ${CMAKE_BINARY_DIR}/bin/mra_tests_replay_lanes
+    COMMAND ${CMAKE_BINARY_DIR}/bin/mra_tests_lazer_format
+    COMMAND ${CMAKE_BINARY_DIR}/bin/mra_tests_lazer_scan
     DEPENDS mra_tests mra_tests_star_rating mra_tests_replay_lanes
+            mra_tests_lazer_format mra_tests_lazer_scan
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    COMMENT "Running mra_tests + star_rating + replay_lanes")
+    COMMENT "Running mra_tests + star_rating + replay_lanes + lazer")
 
 # ---- I-6 偶数键 lane bit 顺序测试 (同样单独 target, 不动 mra_tests 的 main) ----
 add_executable(mra_tests_replay_lanes
     ${MRA_BACKEND}/tests/test_replay_lanes.cpp)
 target_link_libraries(mra_tests_replay_lanes PRIVATE mra_core)
 set_target_properties(mra_tests_replay_lanes PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ---- L1 lazer 数据通道测试 (各自单独 target, mra_tests 的 main 归
+# ---- test_mania_core.cpp; blob 由 backend/tests/gen_lazer_blob.py 生成) ----
+add_executable(mra_tests_lazer_format
+    ${MRA_BACKEND}/tests/lazer_format_tests.cpp)
+target_link_libraries(mra_tests_lazer_format PRIVATE mra_core)
+set_target_properties(mra_tests_lazer_format PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(mra_tests_lazer_scan
+    ${MRA_BACKEND}/tests/lazer_scan_tests.cpp)
+target_link_libraries(mra_tests_lazer_scan PRIVATE mra_core)
+set_target_properties(mra_tests_lazer_scan PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ---- L2 lazer 判定重建引擎测试 (引擎子代理追加; 照 mra_tests_lazer_scan 的写法) ----
+add_executable(mra_tests_lazer_matcher
+    ${MRA_BACKEND}/tests/lazer_matcher_tests.cpp)
+target_link_libraries(mra_tests_lazer_matcher PRIVATE mra_core)
+set_target_properties(mra_tests_lazer_matcher PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(mra_tests_lazer_e2e
+    ${MRA_BACKEND}/tests/lazer_e2e.cpp)
+target_link_libraries(mra_tests_lazer_e2e PRIVATE mra_core)
+target_compile_definitions(mra_tests_lazer_e2e PRIVATE
+    MRA_LAZER_SAMPLES_JSON="${CMAKE_CURRENT_SOURCE_DIR}/build/tmp_lazer/lazer_samples.json"
+    MRA_LAZER_SAMPLE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/test/sample/lazer")
+set_target_properties(mra_tests_lazer_e2e PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

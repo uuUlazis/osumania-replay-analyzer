@@ -1,5 +1,7 @@
 #pragma once
 // .osr replay file parser per the official osu! format specification.
+#include "lazer/lazer_format.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -66,6 +68,13 @@ struct OsrHeader {
     double targetPracticeAccuracy = 0.0;
     // Forward-compatibility diagnostics: bytes after the last known field.
     size_t trailingBytes = 0;
+    // ---- osu!lazer extension (gameVersion >= 30000000) ----
+    // Raw bytes that follow onlineId (+ target-practice double); empty for
+    // well-formed stable replays. lazerExtra is the parsed tail block
+    // (present=false when there is nothing to parse or parsing failed).
+    std::vector<uint8_t> tailRaw;
+    bool isLazer = false;
+    LazerScoreExtra lazerExtra;
 };
 
 // Returns the effective key count implied by key mods, or 0 if no key mod set.

@@ -12,13 +12,19 @@ export default function ReplayPreview() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [skin, setSkin] = useState<ManiaSkin | null>(null);
   const keyCount = snap.beatmap?.keyCount ?? 4;
-  // 判定数据源跟随本次分析使用的规则档 (snap.analysis 可为 null → 回退 V1)
+  // 判定数据源跟随本次分析使用的规则档 (snap.analysis 可为 null → 回退 V1);
+  // lazer 局 rulesProfile 恒为 v2 (matchV2 = lazer 判定 profile 重建)。
   const judgeVersion = snap.analysis?.rulesProfile === "v2" ? "v2" : "v1";
+  // 渲染分流开关: stable 与 lazer 的判定/皮肤渲染逻辑不同 (如 stable V2
+  // 的尾端色带 lazer 不画), 互不渗漏。
+  const isLazer = snap.analysis?.scoreSource === "lazer";
 
   // visible time window from scroll speed (notes spawn above the field)
+  // 落速补偿: rate≠1 时谱面时间以 rate×墙钟前进, 窗口按 rate 放大保持屏幕落速
+  // 与原速 (NM) 一致 (用户定案: DT 落速与原速一致, stable 不因 DT 加快下落)。
   const windowMs = useMemo(
-    () => visibleTimeMs(player.scrollSpeed) + 300,
-    [player.scrollSpeed],
+    () => (visibleTimeMs(player.scrollSpeed) + 300) * (player.rate || 1),
+    [player.scrollSpeed, player.rate],
   );
 
   const sid = snap.sessionId;
@@ -121,10 +127,12 @@ export default function ReplayPreview() {
       skin,
       scrollSpeed: player.scrollSpeed,
       windowMs,
+      rate: player.rate,
       showInputJudges: player.showInputJudges,
       judgeVersion,
+      lazerMode: isLazer,
     });
-  }, [visible, snap.events, snap.eventsV2, snap.frames, player.previewTimeMs, keyCount, player.scrollSpeed, windowMs, snap.sessionId, skin, player.showInputJudges, judgeVersion]);
+  }, [visible, snap.events, snap.eventsV2, snap.frames, player.previewTimeMs, keyCount, player.scrollSpeed, windowMs, player.rate, snap.sessionId, skin, player.showInputJudges, judgeVersion, isLazer]);
 
   return (
     <div className="preview-wrap">

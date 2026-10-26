@@ -76,6 +76,9 @@ scripts\test.bat    :: 构建并运行 mra_tests 单元测试
 | `POST /api/scores/load`、`GET /api/scores?mode&limit` | 载入本地 scores.db（自动推导旁侧 Data\r）/ 按模式查询成绩 |
 | `POST /api/scores/datar` `POST /api/scores/songs` | 手动指定 Data\r 回放目录 / Songs 谱面目录（均只读） |
 | `POST /api/scores/browse` `POST /api/scores/load-replay` | 成绩浏览（懒建 Data\r + Songs 索引）/ 按 playedTicks 一键载入回放+谱面+音乐 |
+| `POST /api/lazer/bind`、`POST /api/lazer/unbind` | 绑定 / 解绑 lazer 数据目录（`dir` 必填；可选 `songsDir` 独立绑定 Songs 做谱面关联） |
+| `GET /api/lazer/browse` | lazer 成绩浏览（`.osr` ≥30000000 尾块 JSON 判定计数为准，ACC 为 lazer 305 口径；`force` 向前兼容） |
+| `POST /api/lazer/load-replay` | 按相对路径一键载入 lazer 回放+谱面+音乐（无音频时 `audioPath:null`；summary 增 `scoreSource`/`lazer` 块） |
 
 错误码：`INVALID_JSON` `MISSING_PATH` `REPLAY_FILE_NOT_FOUND` `REPLAY_PARSE_FAILED` `REPLAY_DECODE_FAILED`
 `REPLAY_FRAMES_INVALID` `BEATMAP_FILE_NOT_FOUND` `BEATMAP_NOT_MANIA` `BEATMAP_PARSE_FAILED` `SESSION_NOT_FOUND`

@@ -15,6 +15,9 @@ export interface PlayerSnapshot {
   volume: number;
   // audio playback rate (beatmap seconds per audio second): DT/NC 1.5, HT 0.75
   rate: number;
+  // NC (Nightcore): stable 语义 = 升调 (重采样, 1:1 映射); 非 NC rate mod
+  // (DT/HT/自定义) = 不升调 (WSOLA 拉伸, timeBase=rate)
+  nightcore: boolean;
   // bumped on skin hot-swap so the preview reloads skin resources
   skinRev: number;
   // user is dragging the seek slider: freeze the clock (and the audio) so the
@@ -35,6 +38,7 @@ let state: PlayerSnapshot = {
   musicUrl: null,
   volume: 1,
   rate: 1,
+  nightcore: false,
   skinRev: 0,
   scrubbing: false,
   holdClock: false,
@@ -144,6 +148,12 @@ export const playerStore = {
   setShowInputJudges(v: boolean) {
     state = { ...state, showInputJudges: v };
     emit();
+  },
+  setNightcore(v: boolean) {
+    if (v !== state.nightcore) {
+      state = { ...state, nightcore: v };
+      emit();
+    }
   },
   setMusicUrl(url: string | null) {
     state = { ...state, musicUrl: url };

@@ -11,6 +11,21 @@ export interface SkinColor {
 
 export type SkinValues = Record<string, string>;
 
+// osu!stable ManiaNoteBodyStyle (osu.Graphics.Skinning, IL 权威):
+// Stretch = 0, RepeatTop = 2, RepeatBottom = 3 (v2.5+ 缺省), RepeatTopAndBottom = 4。
+export type ManiaBodyStyle = "stretch" | "repeatTop" | "repeatBottom" | "repeatTopBottom";
+
+export function parseManiaBodyStyle(v: string | undefined): ManiaBodyStyle | null {
+  if (v === undefined) return null;
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return null;
+  if (n === 0) return "stretch";
+  if (n === 2) return "repeatTop";
+  if (n === 4) return "repeatTopBottom";
+  // 3 与未知值都落入 stable switch 的 default 分支 (源矩形偏移 0) = repeatBottom。
+  return "repeatBottom";
+}
+
 export interface SkinImageRef {
   img: HTMLImageElement | null; // null = missing → color fallback
   w: number;                    // drawn-space width (units)
@@ -30,6 +45,10 @@ export interface ManiaSkin {
     head: SkinImageRef | null;
     body: SkinImageRef | null;
     tail: SkinImageRef | null; // null = use head
+    // stable LN 体绘制方式 (osu!stable ManiaNoteBodyStyle):
+    // skin.ini [Mania] NoteBodyStyle{N} / NoteBodyStyle; Version < 2.5 强制
+    // stretch, 否则缺省 repeatBottom (SkinMania.Obf022446, IL 权威)。
+    bodyStyle: ManiaBodyStyle;
   }[];
   keys: { img: SkinImageRef | null; imgDown: SkinImageRef | null }[];
   stageLeft: number;
@@ -254,6 +273,11 @@ export async function loadManiaSkin(
   const columns: ManiaSkin["columns"] = [];
   for (let i = 0; i < keyCount; ++i) {
     const width = pickAt(widths, i, 30);
+    const style = legacy
+      ? "stretch"
+      : (parseManiaBodyStyle(values["notebodystyle" + i])
+        ?? parseManiaBodyStyle(values.notebodystyle)
+        ?? "repeatBottom");
     columns.push({
       x: cursor,
       width,
@@ -263,6 +287,7 @@ export async function loadManiaSkin(
       head: null,
       body: null,
       tail: null,
+      bodyStyle: style,
     });
     cursor += width + spacing;
     if (boundaries.includes(i + 1)) cursor += stageSep;

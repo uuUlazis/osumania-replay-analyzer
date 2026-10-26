@@ -3,6 +3,7 @@
 // results and segment bookmarks. Single-user desktop app: no locking beyond a
 // mutex for HTTP handler thread safety.
 #include "beatmap/osu_parser.h"
+#include "lazer/lazer_format.h"
 #include "mania/analysis.h"
 #include "mania/hit_matcher.h"
 #include "replay/osr_reader.h"
@@ -44,6 +45,14 @@ struct ReplaySession {
     // Which rules pass powers summary/holds/segments (acc-semantics §0.1:
     // 同一局全链路同口径). true = ScoreV2 (matchV2), false = V1 (match).
     bool rulesScoreV2 = false;
+    // ---- lazer 数据通道 (Phase L1): 声明值层 (判定引擎仍为 stable 口径,
+    // lazer 局由前端标注「stable 判定引擎不适用」) ----
+    bool isLazer = false;              // gameVersion >= kFirstLazerVersion
+    LazerManiaCounts lazerCounts;      // 尾块 JSON 六档 (valid=false = 无尾块)
+    bool lazerCountsFromJson = false;  // true: declared counts 以 JSON 为准
+    std::string lazerRank;             // 尾块 rank (空 = 无)
+    // L3: lazer 转换 mod 复现备注 (RD 缺 seed 无法核对等); 空 = 无备注。
+    std::vector<std::string> lazerModNotes;
     std::vector<ReplaySegment> segments;
     std::optional<std::string> audioPath;  // optional music for synced playback
     bool ready = false;

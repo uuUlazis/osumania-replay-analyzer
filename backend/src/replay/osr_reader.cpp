@@ -69,9 +69,24 @@ OsrParseResult parseOsr(const std::vector<uint8_t>& bytes) {
                 h.targetPracticeAccuracy = r.readF64();
             }
             h.trailingBytes = r.remaining();
+            if (h.trailingBytes > 0)
+                h.tailRaw = r.readBytes(h.trailingBytes);
         }
     } catch (const std::exception& e) {
         result.error = e.what();
+    }
+    // Tail block (osu!lazer >= 30000000 appends i32 length + LZMA(JSON)
+    // after the legacy fields). parseLazerExtra never throws; for stable
+    // files with junk trailing bytes it just reports present=false + error,
+    // which the UI surfaces as a weak hint without blocking. isLazer comes
+    // from the version alone: a lazer replay with a stripped/absent tail is
+    // still a lazer replay (declared counts fall back to the 6 ushorts).
+    if (result.error.empty()) {
+        result.header.isLazer =
+            isLazerGameVersion(result.header.gameVersion);
+        if (!result.header.tailRaw.empty())
+            result.header.lazerExtra = parseLazerExtra(
+                result.header.tailRaw.data(), result.header.tailRaw.size());
     }
     return result;
 }

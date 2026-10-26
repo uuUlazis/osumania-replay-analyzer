@@ -92,6 +92,7 @@ body {
 .btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn.primary { background: var(--accent-dim); border-color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: default; }
+.btn.btn-active { border-color: var(--accent); color: var(--accent); }
 
 .file-line {
   display: flex; gap: 8px; align-items: center; margin-bottom: 8px;
@@ -116,6 +117,9 @@ body {
 table.hits {
   width: 100%; border-collapse: collapse; font-size: 12px;
   font-variant-numeric: tabular-nums;
+  /* 固定布局: 剩余宽度均分到各列, 判定标志间距均匀 (auto 布局按内容比例
+     分配, 300g 列最宽会吃掉最多余量, 造成 300g→300 间距偏大) */
+  table-layout: fixed;
 }
 table.hits th, table.hits td {
   padding: 3px 8px; text-align: right; border-bottom: 1px solid var(--border);
@@ -129,8 +133,24 @@ table.hits thead th {
   display: inline-block; min-width: 34px; text-align: center;
   border-radius: 3px; padding: 1px 4px; font-weight: 600; color: #10121a;
 }
-
-.check-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+/* 判定数统一显示在判定标志下方并居中 (stable/lazer 同一套);
+   td 保持 table-cell, 内层 wrap 做 flex 列; min-width 统一各标志间距 */
+.judge-count-cell {
+  text-align: center;
+  min-width: 64px;
+}
+.judge-count-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  /* 统一 wrap 宽度: 徽标内容宽不一 (300g/MISS 宽于 300), 居中后两侧留白
+     差异造成组间距不匀; 固定宽后 列距-48 = 恒定组间距 */
+  width: 48px;
+}
+.judge-count-cell .judge-count {
+  font-variant-numeric: tabular-nums;
+}
 .check-pass { color: var(--ok); }
 .check-fail { color: var(--danger); }
 .check-na { color: var(--text-dim); }
@@ -319,9 +339,43 @@ input[type="range"].scrub { flex: 1; accent-color: var(--accent); }
   gap: 8px;
   flex-wrap: wrap;
 }
+.score-modal-controls {
+  position: relative;  /* 搜索命令一览浮层的锚点 */
+}
 .score-modal-controls input {
   flex: 1;
   min-width: 180px;
+}
+.score-search-help {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 5;
+  background: #24262e;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  max-width: 560px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+.score-search-help .ssh-title {
+  color: var(--dim, #9aa0b4);
+  margin-bottom: 6px;
+}
+.score-search-help table {
+  border-collapse: collapse;
+}
+.score-search-help th {
+  text-align: left;
+  color: var(--dim, #9aa0b4);
+  padding: 2px 8px 2px 0;
+  vertical-align: top;
+  white-space: nowrap;
+  font-weight: normal;
+}
+.score-search-help td {
+  padding: 2px 0;
 }
 .score-modal-count {
   color: var(--dim, #9aa0b4);
@@ -413,4 +467,174 @@ input[type="range"].scrub { flex: 1; accent-color: var(--accent); }
   color: #e34a4a;
   font-size: 12px;
   padding: 4px 0;
+}
+
+/* ---- 数据源模式开关 (顶栏右侧, stable/lazer) ---- */
+.mode-switch {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.mode-btn {
+  background: var(--bg-panel-2);
+  border: none;
+  color: var(--text-dim);
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mode-btn + .mode-btn { border-left: 1px solid var(--border); }
+.mode-btn:hover:not(:disabled) { color: var(--accent); }
+.mode-btn.active {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+.mode-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- lazer 数据目录绑定卡片 (FileLoader lazer 模式) ---- */
+.lazer-bind-card { display: flex; flex-direction: column; gap: 2px; }
+.lazer-dir-input {
+  flex: 1;
+  min-width: 0;
+  background: #1b1e2a;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 5px 8px;
+}
+.lazer-dir-input:focus { outline: none; border-color: var(--accent); }
+.lazer-status {
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 2px 0;
+  word-break: break-all;
+}
+
+/* ---- 成绩库行内徽标 (lazer) ---- */
+.row-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 16px;
+  vertical-align: middle;
+  background: var(--accent-dim);
+  color: var(--text);
+  white-space: nowrap;
+}
+.row-badge.warn {
+  background: #5a4620;
+  color: #ffd98a;
+}
+
+/* lazer 局注记 (判定显示禁用等) */
+.lazer-note {
+  color: #7fb8e0;
+  font-size: 11px;
+}
+
+/* ---- 左右手分析小窗 (成绩库 modal 同构, 固定小宽度) ---- */
+.hand-modal {
+  width: 560px;
+  max-width: 92vw;
+}
+.hand-subtitle {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.hand-open-row {
+  margin: 4px 0 8px;
+}
+/* 中键归属开关: 滑块居左=归左 (蓝), 居右=归右 (红) */
+.hand-switch {
+  position: relative;
+  width: 46px;
+  height: 24px;
+  border-radius: 12px;
+  border: 1px solid var(--border, #333);
+  background: #8b2020; /* 归右: 红 */
+  cursor: pointer;
+  padding: 0;
+}
+.hand-switch.on-left {
+  background: #1f5fa8; /* 归左: 蓝 */
+}
+.hand-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #cfe3f7;
+  transition: left 0.12s ease;
+}
+.hand-switch.on-right .hand-switch-knob {
+  left: 24px;
+}
+/* 偏差: 打早/打晚两个数字之间的间隔 */
+.hand-dev-gap {
+  display: inline-block;
+  width: 14px;
+}
+.hand-switch-text {
+  color: var(--text, #ddd);
+  font-size: 12px;
+}
+.hand-close {
+  margin-left: auto;
+  padding: 2px 10px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.hand-center-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.hand-center-row input {
+  accent-color: var(--accent);
+}
+.hand-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.hand-col {
+  background: var(--bg-panel-2);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+.hand-col-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.hand-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+  padding: 2px 0;
+  font-variant-numeric: tabular-nums;
+}
+.hand-row .hand-label {
+  color: var(--text-dim);
+}
+.hand-row .hand-value {
+  font-weight: 600;
+}
+.hand-loading {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.hand-error {
+  color: #ffb3b3;
+  font-size: 12px;
 }

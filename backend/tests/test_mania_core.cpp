@@ -1577,7 +1577,17 @@ static void testResetScore() {
 //   V2 pass:      acc=0.99672(1520/1525)、grade=S、score=-2147483648 (NaN 池)
 // .osr 走现成的 osr_reader → lzmaDecode → decodeReplayFrames 链路（与
 // api_server::loadReplaySession 相同），因此这里验证的是真实入口而非合成帧。
+// E2E fixture 数据随版本快照走 (CMake 注入 MRA_E2E_FIXTURE_DIR =
+// <版本源根>/fixtures; 根目录 fixtures/ 已按 2026-10-25 目录约定删除)。
+// 相对前缀回退保留: 从任意 cwd 直接跑 exe 时向上探测。
+#ifndef MRA_E2E_FIXTURE_DIR
+#define MRA_E2E_FIXTURE_DIR "fixtures"
+#endif
 static std::string findFixture(const char* relative) {
+    std::error_code ec;
+    std::filesystem::path p =
+        std::filesystem::path(MRA_E2E_FIXTURE_DIR) / relative;
+    if (std::filesystem::exists(p, ec)) return p.string();
     const char* prefixes[] = {"", "../", "../../", "../../../"};
     for (const char* prefix : prefixes) {
         std::string path = std::string(prefix) + relative;
@@ -1596,10 +1606,11 @@ static bool readWhole(const std::string& path, std::vector<uint8_t>& out) {
 }
 
 static void testFixtureEndToEnd() {
-    const std::string osrPath = findFixture("fixtures/replays/fixture_4k.osr");
-    const std::string osuPath = findFixture("fixtures/beatmaps/fixture_4k.osu");
+    const std::string osrPath = findFixture("replays/fixture_4k.osr");
+    const std::string osuPath = findFixture("beatmaps/fixture_4k.osu");
     if (osrPath.empty() || osuPath.empty()) {
-        std::printf("  [skip] fixture_4k.osr/.osu not found from cwd=%s\n",
+        std::printf("  [skip] fixture_4k.osr/.osu not found (MRA_E2E_FIXTURE_DIR=%s, cwd=%s)\n",
+                    MRA_E2E_FIXTURE_DIR,
                     std::filesystem::current_path().string().c_str());
         ++g_failures;
         return;

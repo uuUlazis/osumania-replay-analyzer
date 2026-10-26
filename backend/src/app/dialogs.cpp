@@ -31,7 +31,8 @@ std::wstring utf8ToWide(const std::string& s) {
 
 static std::optional<std::string> runDialog(bool pickFolder,
                                             const std::wstring& title,
-                                            const std::vector<DialogFilter>& filters) {
+                                            const std::vector<DialogFilter>& filters,
+                                            const std::wstring& initialDir = L"") {
     IFileOpenDialog* dialog = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&dialog));
@@ -59,6 +60,19 @@ static std::optional<std::string> runDialog(bool pickFolder,
     }
     if (!specs.empty()) dialog->SetFileTypes((UINT)specs.size(), specs.data());
 
+    // 上次位置: non-empty initialDir forces the dialog to open there (the
+    // caller passes the path remembered in last_state). Parse failure is
+    // silently ignored - the dialog then opens at the shell default.
+    if (!initialDir.empty()) {
+        IShellItem* start = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(initialDir.c_str(), nullptr,
+                                                  IID_PPV_ARGS(&start))) &&
+            start) {
+            dialog->SetFolder(start);
+            start->Release();
+        }
+    }
+
     if (SUCCEEDED(dialog->Show(nullptr))) {
         IShellItem* item = nullptr;
         if (SUCCEEDED(dialog->GetResult(&item)) && item) {
@@ -79,8 +93,9 @@ std::optional<std::string> openFileDialog(const std::wstring& title,
     return runDialog(false, title, filters);
 }
 
-std::optional<std::string> openFolderDialog(const std::wstring& title) {
-    return runDialog(true, title, {});
+std::optional<std::string> openFolderDialog(const std::wstring& title,
+                                            const std::wstring& initialDir) {
+    return runDialog(true, title, {}, initialDir);
 }
 
 }  // namespace mra

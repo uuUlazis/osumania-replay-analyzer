@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 
 interface Props {
+  mode: import("../models/types").ScoreSourceMode;
   onLoad: (
     replayPath: string,
     beatmapPath: string,
@@ -45,7 +46,22 @@ const SCORES_FILTERS = [
   { name: "All Files", pattern: "*.*" },
 ];
 
+// lastScanMs 的语义 (时间戳 / 扫描耗时) 联调待定: 按量级自适应显示
+function lazerScanText(ms: number): string {
+  if (ms > 1e12) {
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return (
+      "上次扫描 " + d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" +
+      p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" +
+      p(d.getSeconds())
+    );
+  }
+  return "上次扫描耗时 " + ms + " ms";
+}
+
 export default function FileLoader({
+  mode,
   onLoad,
   loading,
   onScoresLoaded,
@@ -61,7 +77,6 @@ export default function FileLoader({
   const [skinFolder, setSkinFolder] = useState<string | undefined>();
   const [audioPath, setAudioPath] = useState<string | undefined>();
   const [scoresPath, setScoresPath] = useState<string | undefined>();
-  const [scoresInfo, setScoresInfo] = useState("");
   const [dataRAuto, setDataRAuto] = useState(false);
   const [dataRPath, setDataRPath] = useState("");
   const [dataRHint, setDataRHint] = useState("");
@@ -75,6 +90,16 @@ export default function FileLoader({
   const [restoring, setRestoring] = useState(false);
   const [lastSkin, setLastSkin] = useState<string | null>(null);
   const [restoringSkin, setRestoringSkin] = useState(false);
+  // lazer 成绩源绑定 (仅 lazer 模式的成绩源区展示; stable 式「选中即绑定」,
+  // 目录持久化到 last_state.lazerDir; 挂载时只记上次位置, 不自动回填/绑定)
+  const [lazerDir, setLazerDir] = useState("");
+  const [lastLazerDir, setLastLazerDir] = useState("");
+  const [lastSongs, setLastSongs] = useState("");
+  const [lazerInfo, setLazerInfo] = useState<
+    import("../models/types").LazerBindResult | null
+  >(null);
+  const [lazerBusy, setLazerBusy] = useState<"bind" | null>(null);
+  const [lazerError, setLazerError] = useState("");
 
   // Restart-persistent last-session state. The backend stores it in
   // %LOCALAPPDATA%\ManiaReplayAnalyzer\last_state.json because the page
@@ -97,7 +122,9 @@ export default function FileLoader({
       if (!alive || !s) return;
       if (s.scores && s.dataR && s.songs)
         setLastPaths({ scores: s.scores, dataR: s.dataR, songs: s.songs });
+      if (s.lazerSongs) setLastSongs(s.lazerSongs);  // 上次位置按钮的恢复来源 (不自动回填)
       if (s.skin) setLastSkin(s.skin);
+      if (s.lazerDir) setLastLazerDir(s.lazerDir);
     }).catch(() => {});
     return () => {
       alive = false;
@@ -157,11 +184,9 @@ export default function FileLoader({
       const res = await api.dialogOpenFile("选择 osu! scores.db", SCORES_FILTERS);
       if (res.code === "DIALOG_CANCELLED" || !res.path) return;
       setScoresPath(res.path);
-      setScoresInfo("");
       setScoresLoading(true);
       try {
         const result = await api.scoresLoad(res.path);
-        setScoresInfo(result.total + " 条成绩");
         setDataRAuto(result.dataRAuto);
         setDataRPath(result.dataRFolder);
         setDataRHint(result.dataRHint);
@@ -202,10 +227,21 @@ export default function FileLoader({
       async (p) => {
         if (!p) return;
         try {
-          await api.scoresSongs(p);
-          setSongsPath(p);
-          onScoresSongs(p);
-          if (scoresPath && dataRPath) rememberPaths(scoresPath, dataRPath, p);
+          if (mode === "lazer") {
+            // lazer 的 Songs 记忆独立成键 (lazerSongs), 不覆写 stable
+            // 上次位置三元组 (scores/dataR/songs)。
+            api.saveLastState({ lazerSongs: p }).catch(() => undefined);
+            setSongsPath(p);
+            onScoresSongs(p);
+            // 已绑 (或已记) lazer 目录时重发绑定, 后端 songsFolder_ 立即跟随
+            if (lazerInfo && (lazerDir || lastLazerDir))
+              await api.lazerBind(lazerDir || lastLazerDir, p);
+          } else {
+            await api.scoresSongs(p);
+            setSongsPath(p);
+            onScoresSongs(p);
+            if (scoresPath && dataRPath) rememberPaths(scoresPath, dataRPath, p);
+          }
         } catch (e) {
           setDialogError(e instanceof Error ? e.message : String(e));
         }
@@ -220,7 +256,6 @@ export default function FileLoader({
     try {
       const result = await api.scoresLoad(lastPaths.scores);
       setScoresPath(lastPaths.scores);
-      setScoresInfo(result.total + " 条成绩");
       setDataRAuto(result.dataRAuto);
       setDataRPath(result.dataRFolder);
       setDataRHint(result.dataRHint);
@@ -252,6 +287,85 @@ export default function FileLoader({
       onSkinFolder(lastSkin);
     } finally {
       setRestoringSkin(false);
+    }
+  };
+
+  // 切回默认显示皮肤 (卸载自定义皮肤; onSkinFolder("") 会通知后端卸载并
+  // 触发内置回退渲染)。特例 (2026-10-25 用户约定): 不写 last_state.skin,
+  // 上次自定义皮肤的记忆保留, 下次启动仍可从「上次皮肤」恢复。
+  const restoreDefaultSkin = () => {
+    setSkinFolder("");
+    onSkinFolder("");
+  };
+
+  // ---- lazer 数据目录 (仅 lazer 模式) ----
+  // stable 式「选中即绑定」: 目录对话框确认后立即扫描绑定 (对话框以上次
+  // 位置为初始目录); 取消则不动。绑定成功才持久化 last_state.lazerDir。
+  const bindLazerDir = async (dir: string) => {
+    const d = dir.trim();
+    if (!d || lazerBusy) return;
+    setLazerBusy("bind");
+    setLazerError("");
+    setLazerDir(d);
+    try {
+      const info = await api.lazerBind(d, songsPath || undefined);
+      setLazerInfo(info);
+      setLazerDir(info.dir || d);
+      api.saveLastState({ lazerDir: d }).catch(() => undefined);
+    } catch (e) {
+      setLazerError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLazerBusy(null);
+    }
+  };
+
+  const pickLazerDir = () =>
+    pick(
+      // 上次位置: 对话框直接开在上次绑定 (或当前输入) 的目录。
+      () =>
+        api.dialogOpenFolder(
+          "选择 osu!lazer 数据目录",
+          lazerDir || lastLazerDir || undefined,
+        ),
+      (p) => {
+        if (p) void bindLazerDir(p);
+      },
+    );
+
+  // 上次位置: 恢复上次绑定的 lazer 目录 **与 Songs 目录** 并立即绑定。
+  // 与 stable 的上次位置同构: 先弹窗预览, 确认后才应用; 成功才关弹窗并
+  // 更新显示, 失败留在弹窗内报错 —— 不做乐观回填, 避免路径显示"闪一下"
+  // 或显示已变化但实际未绑定的状态。
+  const restoreLastLazer = async () => {
+    if (lazerBusy || (!lastLazerDir && !lastSongs)) return;
+    // 已绑定同一目录且 Songs 一致 → 无需重绑 (lazerBind 会重扫目录), 直接关弹窗。
+    if (lazerInfo && lazerInfo.dir === lastLazerDir &&
+        (!lastSongs || songsPath === lastSongs)) {
+      setRestoreOpen(false);
+      return;
+    }
+    setLazerBusy("bind");
+    setLazerError("");
+    try {
+      if (lastLazerDir) {
+        // lazerBind 携带 songsDir, 一次调用同时恢复两个绑定; 成功才更新
+        // 显示与记忆。
+        const info = await api.lazerBind(lastLazerDir, lastSongs || undefined);
+        setLazerDir(info.dir || lastLazerDir);
+        setLazerInfo(info);
+        api.saveLastState({ lazerDir: lastLazerDir }).catch(() => undefined);
+      }
+      if (lastSongs) {
+        // 仅恢复显示与记忆 (lazerSongs); 运行时绑定随下次 lazerBind 携带,
+        // 不走 scoresSongs (避免覆写 stable 的 songs 记忆)。
+        setSongsPath(lastSongs);
+        api.saveLastState({ lazerSongs: lastSongs }).catch(() => undefined);
+      }
+      setRestoreOpen(false);
+    } catch (e) {
+      setLazerError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLazerBusy(null);
     }
   };
 
@@ -297,85 +411,175 @@ export default function FileLoader({
           </span>
         </div>
         <div className="half">
-          <button
-            className="btn"
-            disabled={!lastSkin || restoringSkin}
-            onClick={restoreLastSkin}
-            title={lastSkin ? "恢复上次使用的皮肤: " + lastSkin : "暂无上次使用的皮肤"}
-          >
-            上次皮肤
-          </button>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button
+              className="btn"
+              disabled={!lastSkin || restoringSkin}
+              onClick={restoreLastSkin}
+              title={lastSkin ? "恢复上次使用的皮肤: " + lastSkin : "暂无上次使用的皮肤"}
+            >
+              上次皮肤
+            </button>
+            <button
+              className="btn"
+              disabled={!skinFolder}
+              onClick={restoreDefaultSkin}
+              title="卸载自定义皮肤, 切回内置默认渲染"
+            >
+              默认皮肤
+            </button>
+          </div>
         </div>
       </div>
       <div className="loader-sep" />
-      <div className="pick-row half2">
-        <div className="half">
-          <button
-            className="btn"
-            onClick={pickScores}
-            disabled={scoresLoading}
-            title={scoresPath}
-          >
-            {scoresLoading ? "读取中…" : scoresPath ? "scores.db 已选" : "scores.db"}
-          </button>
-          <span className="path" title={scoresPath}>
-            {scoresInfo || scoresPath || "未选择"}
-          </span>
-        </div>
-        <div className="half">
-          <button
-            className="btn"
-            onClick={pickDataR}
-            disabled={!scoresPath}
-            title={dataRPath || "选择 Data\\r 回放目录 (只读)"}
-          >
-            {dataRPath
-              ? dataRAuto
-                ? "Data\\r 已自动找到"
-                : "Data\\r 已选"
-              : "Data\\r 目录"}
-          </button>
-          <span className="path" title={dataRPath}>
-            {dataRPath || dataRHint || "未选择"}
-          </span>
-        </div>
-      </div>
-      <div className="pick-row half2">
-        <div className="half">
-          <button
-            className="btn"
-            onClick={pickSongs}
-            title={songsPath}
-          >
-            {songsPath ? "Songs 已选" : "Songs 目录"}
-          </button>
-          <span className="path" title={songsPath}>
-            {songsPath || "未选择"}
-          </span>
-        </div>
-        <div className="half">
-          <button
-            className="btn primary"
-            disabled={!browserReady || !scoresPath || !dataRPath || !songsPath}
-            onClick={onOpenBrowser}
-            title={
-              scoresPath && dataRPath && songsPath
-                ? "浏览 scores.db 中的成绩并一键载入回放"
-                : "需要先选择 scores.db、Data\\r 与 Songs 目录"
-            }
-          >
-            回放列表
-          </button>
-          <button
-            className="btn primary"
-            disabled={!lastPaths}
-            onClick={() => setRestoreOpen(true)}
-            title={lastPaths ? "恢复上次的 scores.db / Data\\r / Songs 位置" : "暂无上次的位置记录"}
-          >
-            上次位置
-          </button>
-        </div>
-      </div>
+      {mode === "lazer" ? (
+        <>
+          <div className="pick-row half2">
+            <div className="half">
+              <button
+                className="btn"
+                disabled={lazerBusy !== null}
+                onClick={pickLazerDir}
+                title="选择 osu!lazer 数据目录 (确认后立即扫描绑定)"
+              >
+                {lazerBusy === "bind"
+                  ? "绑定中…"
+                  : lazerInfo
+                    ? "lazer 目录已绑"
+                    : "lazer 目录"}
+              </button>
+              <span
+                className="path"
+                title={
+                  lazerInfo
+                    ? lazerInfo.dir + " · " + lazerScanText(lazerInfo.lastScanMs)
+                    : lazerDir
+                }
+              >
+                {lazerInfo?.dir || lazerDir || "未选择"}
+              </span>
+            </div>
+            <div className="half">
+              <button className="btn" onClick={pickSongs} title={songsPath}>
+                {songsPath ? "Songs 已选" : "Songs 目录"}
+              </button>
+              <span className="path" title={songsPath}>
+                {songsPath || "未选择"}
+              </span>
+            </div>
+          </div>
+          <div className="pick-row half2">
+            <div className="half">
+              <button
+                className="btn primary"
+                disabled={!lazerInfo || !songsPath}
+                onClick={onOpenBrowser}
+                title={
+                  !lazerInfo
+                    ? "需要先选择 lazer 数据目录"
+                    : !songsPath
+                      ? "需要先选择 Songs 目录 (谱面关联)"
+                      : "浏览 lazer 成绩并一键载入分析"
+                }
+              >
+                成绩库
+              </button>
+            </div>
+            <div className="half">
+              <button
+                className="btn primary"
+                disabled={lazerBusy !== null || (!lastLazerDir && !lastSongs)}
+                onClick={() => setRestoreOpen(true)}
+                title={
+                  lastLazerDir || lastSongs
+                    ? "恢复上次的位置并绑定: " +
+                      [lastLazerDir && "lazer=" + lastLazerDir,
+                       lastSongs && "Songs=" + lastSongs].filter(Boolean).join(" · ")
+                    : "暂无上次的位置记录"
+                }
+              >
+                上次位置
+              </button>
+            </div>
+          </div>
+          {lazerError ? (
+            <div className="error-banner" style={{ margin: "6px 0 0" }}>
+              {lazerError}
+            </div>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <div className="pick-row half2">
+            <div className="half">
+              <button
+                className="btn"
+                onClick={pickScores}
+                disabled={scoresLoading}
+                title={scoresPath}
+              >
+                {scoresLoading ? "读取中…" : scoresPath ? "scores.db 已选" : "scores.db"}
+              </button>
+              <span className="path" title={scoresPath}>
+                {scoresPath || "未选择"}
+              </span>
+            </div>
+            <div className="half">
+              <button
+                className="btn"
+                onClick={pickDataR}
+                disabled={!scoresPath}
+                title={dataRPath || "选择 Data\\r 回放目录 (只读)"}
+              >
+                {dataRPath
+                  ? dataRAuto
+                    ? "Data\\r 已自动找到"
+                    : "Data\\r 已选"
+                  : "Data\\r 目录"}
+              </button>
+              <span className="path" title={dataRPath}>
+                {dataRPath || dataRHint || "未选择"}
+              </span>
+            </div>
+          </div>
+          <div className="pick-row half2">
+            <div className="half">
+              <button
+                className="btn"
+                onClick={pickSongs}
+                title={songsPath}
+              >
+                {songsPath ? "Songs 已选" : "Songs 目录"}
+              </button>
+              <span className="path" title={songsPath}>
+                {songsPath || "未选择"}
+              </span>
+            </div>
+            <div className="half">
+              <button
+                className="btn primary"
+                disabled={!browserReady || !scoresPath || !dataRPath || !songsPath}
+                onClick={onOpenBrowser}
+                title={
+                  scoresPath && dataRPath && songsPath
+                    ? "浏览 scores.db 中的成绩并一键载入回放"
+                    : "需要先选择 scores.db、Data\\r 与 Songs 目录"
+                }
+              >
+                回放列表
+              </button>
+              <button
+                className="btn primary"
+                disabled={!lastPaths}
+                onClick={() => setRestoreOpen(true)}
+                title={lastPaths ? "恢复上次的 scores.db / Data\\r / Songs 位置" : "暂无上次的位置记录"}
+              >
+                上次位置
+              </button>
+            </div>
+          </div>
+        </>
+      )}
       <div className="loader-sep" />
       <div className="pick-row">
         <button
@@ -387,7 +591,41 @@ export default function FileLoader({
         </button>
       </div>
       {dialogError ? <div className="error-banner">{dialogError}</div> : null}
-      {restoreOpen && lastPaths ? (
+      {mode === "lazer" && restoreOpen && (lastLazerDir || lastSongs) ? (
+        <div className="score-modal-backdrop" onClick={() => setRestoreOpen(false)}>
+          <div className="score-modal restore-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="score-modal-head">
+              <h2>恢复上次位置</h2>
+            </div>
+            <div className="restore-paths">
+              {lastLazerDir ? (
+                <div className="restore-path-row">
+                  <span className="restore-label">lazer 数据目录</span>
+                  <span className="path" title={lastLazerDir}>{lastLazerDir}</span>
+                </div>
+              ) : null}
+              {lastSongs ? (
+                <div className="restore-path-row">
+                  <span className="restore-label">Songs</span>
+                  <span className="path" title={lastSongs}>{lastSongs}</span>
+                </div>
+              ) : null}
+            </div>
+            {lazerError ? <div className="error-banner">{lazerError}</div> : null}
+            <div className="score-modal-foot">
+              <button className="btn" onClick={() => setRestoreOpen(false)}>取消</button>
+              <button
+                className="btn primary"
+                disabled={lazerBusy !== null}
+                onClick={() => void restoreLastLazer()}
+              >
+                {lazerBusy !== null ? "绑定中…" : "确认绑定"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {mode === "stable" && restoreOpen && lastPaths ? (
         <div className="score-modal-backdrop" onClick={() => setRestoreOpen(false)}>
           <div className="score-modal restore-modal" onClick={(e) => e.stopPropagation()}>
             <div className="score-modal-head">

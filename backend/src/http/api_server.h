@@ -15,6 +15,7 @@ namespace httplib { class Server; }
 namespace mra {
 
 struct ScoresDb;
+class LazerScanIndex;
 
 // Lightweight metadata for a beatmap file found in the Songs folder.
 struct SongsBeatmapMeta {
@@ -147,6 +148,23 @@ class ApiServer {
     // (scoresMutex_ must be held). Best-effort: a transient parse failure
     // (osu! mid-write) keeps the previous snapshot silently.
     void refreshScoreStoresLocked(std::string& err);
+    // Songs-index-only refresh for callers without scores.db/Data\r (the
+    // lazer data channel). Same semantics as section 3 of
+    // refreshScoreStoresLocked; scoresMutex_ must be held.
+    void refreshSongsIndexLocked(std::string& err);
+
+    // ---- lazer 数据通道 (Phase L1): 绑定目录 + .osr 扫描索引 ----
+    // 锁序约定: scoresMutex_ → lazerMutex_ (browse 的谱面 join 需要两者)。
+    std::mutex lazerMutex_;
+    std::unique_ptr<LazerScanIndex> lazerIndex_;
+    std::string lazerDir_;
+    // .osr 解析时机 (L3.1 用户约定): bind (目录选择/上次位置) 只登记目录,
+    // 不解析; 首次打开回放库 (browse/载入) 才 warm+refresh 全量解析。
+    bool lazerIndexBuilt_ = false;
+    // 构建扫描索引 (warmFromDisk=true 先灌持久化缓存预热; false 丢弃缓存全
+    // 量重扫 = 强制刷新), 构建后持久化。lazerMutex_ 必须持有。
+    void buildLazerIndexLocked(bool warmFromDisk);
+    void persistLazerIndexLocked();
 };
 
 }  // namespace mra

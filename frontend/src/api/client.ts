@@ -48,9 +48,10 @@ export const api = {
       title,
       filters: filters ?? [{ name: "All Files", pattern: "*.*" }],
     }),
-  dialogOpenFolder: (title: string) =>
+  dialogOpenFolder: (title: string, initialDir?: string) =>
     call<{ path?: string; code?: string }>("POST", "/api/dialog/open-folder", {
       title,
+      ...(initialDir ? { initialDir } : {}),
     }),
   loadReplay: (
     replayPath: string,
@@ -105,6 +106,21 @@ export const api = {
         (version ? `&version=${version}` : ""),
     ),
   audioUrl: (sid: string) => `/api/audio/${sid}`,
+  // 左右手分析: startMs/endMs 同时给 = 选段范围, 不给 = 全局
+  hands: (
+    sid: string,
+    centerToLeft: boolean,
+    startMs?: number,
+    endMs?: number,
+  ) =>
+    call<import("../models/types").HandAnalysisResponse>(
+      "POST",
+      `/api/analysis/${sid}/hands`,
+      {
+        centerToLeft,
+        ...(startMs != null && endMs != null ? { startMs, endMs } : {}),
+      },
+    ),
   segment: (sid: string, startMs: number, endMs: number) =>
     call<import("../models/types").SegmentResult>(
       "POST",
@@ -130,6 +146,15 @@ export const api = {
       showInputJudges?: boolean;
       debugLog?: boolean;
       scoreColWidths?: number[];
+      // Phase L1: 数据源模式 + lazer 数据目录 (后端按需透传, 缺省时前端用默认值)
+      scoreSourceMode?: import("../models/types").ScoreSourceMode;
+      lazerDir?: string;
+      // lazer 模式的 Songs 记忆 (独立键, 不与 stable 上次位置三元组共用)
+      lazerSongs?: string;
+      // 左右手分析: 奇数 key 时中键归属 (true=归左, 缺省 false=归左)
+      handCenterToLeft?: boolean;
+      // 预览落速 (lazer mania scale 1..40)
+      scrollSpeed?: number;
     }>("GET", "/api/last-state"),
   saveLastState: (patch: Record<string, string | number | boolean | null | number[]>) =>
     call("POST", "/api/last-state", patch),
@@ -153,4 +178,29 @@ export const api = {
       "GET",
       "/api/scores?mode=" + mode + "&limit=" + limit,
     ),
+  // ---- lazer 数据通道 (Phase L1) ----
+  // 绑定 lazer 数据目录 (含 client.realm / scores.db), 后端扫描成绩库
+  lazerBind: (dir: string, songsDir?: string) =>
+    call<import("../models/types").LazerBindResult>(
+      "POST",
+      "/api/lazer/bind",
+      { dir, ...(songsDir ? { songsDir } : {}) },
+    ),
+  lazerUnbind: () => call<Record<string, never>>("POST", "/api/lazer/unbind"),
+  // force=1: 跳过缓存重扫 lazer 数据目录
+  lazerBrowse: (force?: boolean) =>
+    call<import("../models/types").LazerBrowseResult>(
+      "GET",
+      "/api/lazer/browse?force=" + (force ? 1 : 0),
+    ),
+  // 与 /api/replays/load 同构 (返回 sessionId); audioPath 为可选扩展字段,
+  // null 表示后端明确无法解析音频, 缺省时前端按谱面已命中尝试加载
+  lazerLoadReplay: (file: string) =>
+    call<{
+      sessionId: string;
+      replayPath: string;
+      beatmapPath: string;
+      audioPath?: string | null;
+      beatmapMd5: string;
+    }>("POST", "/api/lazer/load-replay", { file }),
 };

@@ -10,6 +10,18 @@ import { PreciseAudioPlayer } from "../audio/precisePlayer";
 // Larger than a frame gap so normal clock advance never triggers a seek.
 const SEEK_TOLERANCE_S = 0.08;
 
+// 谱面时间 ↔ 音频时间换算: 1:1。playbackRate 只负责把歌放快/放慢 (buffer 位置
+// 时间换算基数 = player.timeBaseValue: WSOLA 拉伸路径 (DT/HT/自定义 rate,
+// 音高保持) 下 buffer 时间 × timeBase = 谱面时间; NC 重采样路径 (升调) 与
+// NM 下 buffer 时间 ≡ 谱面时间 (timeBase=1)。曾因无 timeBase 概念把
+// NC 的重采样双重换算 (×1.5 又 ÷1.5 的位置错了对象), 造成音画不同步。
+function beatmapMsToAudioSec(ms: number, tb: number): number {
+  return Math.max(0, ms) / 1000 / tb;
+}
+function audioSecToBeatmapMs(sec: number, tb: number): number {
+  return sec * tb * 1000;
+}
+
 export default function AudioSync() {
   const player = useSyncExternalStore(playerStore.subscribe, playerStore.get);
   const playerRef = useRef<PreciseAudioPlayer | null>(null);
@@ -33,7 +45,10 @@ export default function AudioSync() {
       playerRef.current = p;
       (window as unknown as { __mraAudio?: PreciseAudioPlayer }).__mraAudio = p;
     }
-    p.load(player.musicUrl)
+    // NC (升调) = 重采样: timeStretch=1 走 1:1 映射; 其余 rate mod (DT/HT/
+    // 自定义) 不升调 = WSOLA 拉伸 (timeBase=rate, playbackRate 锁 1)
+    const st = playerStore.get();
+    p.load(player.musicUrl, st.nightcore ? 1 : st.rate)
       .then(() => {
         if (!alive) return;
         p!.setVolume(playerStore.get().volume);
@@ -43,7 +58,7 @@ export default function AudioSync() {
         if (alive) setFailed(true);
       });
     return () => { alive = false; };
-  }, [player.musicUrl]);
+  }, [player.musicUrl, player.nightcore]);
 
   // Follow loop: the decoded player clock is the only time source. The loop
   // seeks the player when the preview jumps (slider click, drag release) and
@@ -63,15 +78,15 @@ export default function AudioSync() {
         if (p.playing) p.pause();
         return;
       }
-      const rate = p.rate || 1;
-      const target = Math.max(0, st.previewTimeMs) / 1000 / rate; // audio sec
+      const tb = p.timeBaseValue || 1;
+      const target = beatmapMsToAudioSec(st.previewTimeMs, tb);
       if (st.playing) {
         if (!p.playing) {
           void p.play(target); // drag ended while playing: resume at the slider
         } else if (Math.abs(target - p.currentTime) > SEEK_TOLERANCE_S) {
           p.seek(target); // external seek: one exact sample jump
         }
-        playerStore.snapAudio(p.currentTime * 1000 * rate); // back to beatmap ms
+        playerStore.snapAudio(audioSecToBeatmapMs(p.currentTime, tb)); // beatmap ms
       } else if (Math.abs(target - p.currentTime) > SEEK_TOLERANCE_S) {
         p.seek(target); // paused seek: moves the resume offset
       }
@@ -88,9 +103,10 @@ export default function AudioSync() {
   useEffect(() => {
     const p = playerRef.current;
     if (!p || !ready) return;
-    const rate = p.rate || 1;
     if (player.playing) {
-      void p.play(Math.max(0, player.previewTimeMs) / 1000 / rate);
+      void p.play(
+        beatmapMsToAudioSec(player.previewTimeMs, p.timeBaseValue || 1),
+      );
     } else p.pause();
   }, [player.playing, ready]);
 

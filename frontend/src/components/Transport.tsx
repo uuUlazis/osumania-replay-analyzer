@@ -6,6 +6,7 @@ import { visibleTimeMs } from "../render/maniaSkin";
 
 export default function Transport() {
   const player = useSyncExternalStore(playerStore.subscribe, playerStore.get);
+  // lazer 局判定显示 = lazer 判定 profile 重建 (与 stable 同一叠加层)
   const dur = Math.max(1, player.durationMs);
   return (
     <div className="transport">
@@ -68,7 +69,11 @@ export default function Transport() {
           max={40}
           step={1}
           value={player.scrollSpeed}
-          onChange={(e) => playerStore.setScrollSpeed(Number(e.target.value))}
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            playerStore.setScrollSpeed(v);
+            api.saveLastState({ scrollSpeed: v }).catch(() => {});
+          }}
         />
         <span className="speed-value">
           {player.scrollSpeed} ({Math.round(visibleTimeMs(player.scrollSpeed))}ms)

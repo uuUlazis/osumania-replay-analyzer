@@ -136,7 +136,11 @@ std::optional<SkinImage> SkinLoader::findManiaHoldHead(int keyCount, int column)
 
 std::optional<SkinImage> SkinLoader::findManiaHoldBody(int keyCount, int column) const {
     std::string suffix = columnSuffix(column, keyCount);
+    // 体元素候选: B (经典 2.x 体) -> L (长按体, 本皮肤/新版皮肤常用) ->
+    // T (末选兜底)。L 缺失是 "面尾形状不对" 的根因: 只认 B/T 时会把尾
+    // 贴图错当体拉伸。
     if (auto img = findElement("mania-note" + suffix + "B")) return img;
+    if (auto img = findElement("mania-note" + suffix + "L")) return img;
     if (auto img = findElement("mania-note" + suffix + "T")) return img;
     return std::nullopt;
 }
