@@ -77,4 +77,4 @@ ManiaReplayAnalyzer-0.1.2.zip，解压后双击 ManiaReplayAnalyzer.exe。
 
 ## 反馈
 
-问题与建议欢迎在 GitHub Issues 提交，附上对应的回放文件与谱面最有助于定位。
+问题与建议欢迎在 GitHub Issues 提交，如果可以的话附上对应的回放文件与谱面可助于定位。
