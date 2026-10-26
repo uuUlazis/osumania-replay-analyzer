@@ -4,6 +4,8 @@
 给出准确率、偏移统计、一致性核查与可视化回放预览。同时支持浏览 stable 与 lazer
 的本地成绩库。全部数据在本地处理，不访问网络。
 
+![主界面：总览统计 · 时间轴 · 回放预览](docs/screenshot-main.png)
+
 ## 下载与运行
 
 从 [Releases](https://github.com/uuUlazis/osumania-replay-analyzer/releases) 下载
