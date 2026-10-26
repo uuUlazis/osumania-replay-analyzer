@@ -1,0 +1,26 @@
+osu file format v14
+
+[General]
+AudioFilename: audio.mp3
+Mode: 3
+
+[Metadata]
+Title:Fixture Song
+Artist:Fixture Artist
+Creator:Fixture Mapper
+Version:4K Test
+BeatmapID:101
+BeatmapSetID:10
+
+[Difficulty]
+HPDrainRate:8
+CircleSize:4
+OverallDifficulty:8
+ApproachRate:8
+SliderMultiplier:1.8
+
+[HitObjects]
+64,192,1000,1,0,0:0:0:0:
+192,192,1000,1,0,0:0:0:0:
+320,192,2000,1,0,0:0:0:0:
+448,192,3000,128,0,3200:0:0:0:
