@@ -23,4 +23,9 @@ AssetProvider makeDefaultAssetProvider(const std::wstring& distDir);
 // Resource identifiers used in the generated .rc (path -> resource name).
 bool loadEmbeddedResource(int resourceId, std::vector<uint8_t>& out);
 
+// Serves an element of the bundled osu!mania default skin (ppy/osu-resources,
+// MIT; embedded under "default-skin/"). Case-insensitive; tries the element
+// name as-is and with a ".png" suffix. Returns false when absent.
+bool loadEmbeddedDefaultSkin(const std::string& element, EmbeddedAsset& out);
+
 }  // namespace mra

@@ -9,7 +9,7 @@
 ## 下载与运行
 
 从 [Releases](https://github.com/uuUlazis/osumania-replay-analyzer/releases) 下载
-ManiaReplayAnalyzer-0.1.2.zip，解压后双击 ManiaReplayAnalyzer.exe。
+ManiaReplayAnalyzer-v0.1.3.zip，解压后双击 ManiaReplayAnalyzer.exe（exe 需与 `frontend/dist` 文件夹保持相对位置）。
 
 - 优先以内嵌窗口打开；失败时自动回退到系统默认浏览器（功能完全一致）
 - 首次运行如遇 SmartScreen 提示：点「更多信息 → 仍要运行」即可

@@ -3,6 +3,7 @@
 #include "io/paths.h"
 
 #include "app/dialogs.h"
+#include "app/embedded_assets.h"
 #include "beatmap/osu_parser.h"
 #include "io/md5.h"
 #include "lazer/lazer_scan.h"
@@ -304,13 +305,13 @@ double round5(double v) { return std::round(v * 100000.0) / 100000.0; }
 // ---- Hands aggregation (POST /api/analysis/{sid}/hands) ----
 struct HandBucket {
     int64_t max = 0, c300 = 0, c200 = 0, c100 = 0, c50 = 0;
-    // miss 只作展示计数 (用户 2026-10-25 追加), 不进 n/acc/偏差
+    // miss 只作展示计数 (用户 2026-10-25 追加), 进 acc 分母, 权重 0; 不进 n/偏差 — miss 无偏移样本) [2026-10-27 修正]
     int64_t miss = 0;
 };
 
 struct HandStats {
     HandBucket counts;
-    int64_t n = 0;                     // hit judgements only (miss never counted)
+    int64_t n = 0;                     // 命中判定数 (miss 计入 acc 分母, 不计于此)
     double acc = 0.0;                  // percent, follows the match's scoring profile
     // 打早/打晚平均 (符号保留, 打早为负): 各侧只对各自样本求均值, offset=0 不计
     // (用户定案 1A/2A/3B); 无样本保持 0, 由 hasEarly/hasLate 区分前端显示 -
@@ -318,7 +319,7 @@ struct HandStats {
     bool hasEarly = false, hasLate = false;
 };
 
-// Hit grade -> per-grade bucket. Miss 计数仅展示; 命中档才进 n/acc/偏差
+// Hit grade -> per-grade bucket. miss 进 acc 分母 (权重 0); 命中档才进 n/偏差
 // (未匹配输入仍由调用方排除, 不进任何统计)。
 void handBucketAdd(HandBucket& b, HitResult r) {
     switch (r) {
@@ -351,17 +352,21 @@ json handStatsJson(const HandStats& h) {
 // One hand's aggregation over the match pass of the session's scoring
 // profile (rulesScoreV2 ? matchV2 : match — same source as /segment).
 // Code fact: match.events already carries LN head AND tail judgement events
-// (phase == HoldHead / HoldTail) and holds[].head/.tail duplicate them, so
-// each judged object contributes exactly ONE hit:
+// (phase == HoldHead / HoldTail) and holds[].head/.tail duplicate them.
+// V1 (stable): each judged object contributes exactly ONE hit —
 //   * rice / note head -> NoteHead event (time axis: objectTimeMs)
 //   * hold note        -> holds[].tail combined judgement (time axis:
 //                         tail.objectTimeMs), deduplicated by objectIndex —
 //                         the same "one unit per LN" tally analyzeSegment
 //                         uses for stableCounts; the events' HoldHead /
 //                         HoldTail copies are always skipped.
+// V2 (ScoreV2/lazer): an LN is TWO independent judgements (head + tail;
+//   same tally analyzeSegment/总览 uses for counts: NoteHead + HoldHead +
+//   holds[].tail), so HoldHead events are counted too. Skipping them
+//   undercounted acc — LN heads are near-always MAX (2026-10-27 fix).
 // Effective judgement = v1Judgement.value_or(judgement): V1 (stable) LNs
 // carry the combined head+tail result in v1Judgement, rice and V2 events
-// fall back to their own judgement. Misses are skipped entirely.
+// fall back to their own judgement. Misses enter counts + acc (weight 0) but no n/offset.
 HandStats analyzeHand(const MatchResult& match, int keyCount, bool leftHand,
                       bool centerToLeft, bool hasRange, int64_t startMs,
                       int64_t endMs, bool v2Profile) {
@@ -377,34 +382,38 @@ HandStats analyzeHand(const MatchResult& match, int keyCount, bool leftHand,
         return centerToLeft;  // odd key count: center column is assignable
     };
 
-    auto consider = [&](const HitEvent& ev, int64_t timeMs) {
+    auto consider = [&](const HitEvent& ev, int64_t timeMs, bool withOffset) {
         if (ev.column < 0 || ev.column >= keyCount) return;
         if (isLeft(ev.column) != leftHand) return;  // 只统计本手 (leftHand 由调用方给出)
         if (hasRange && (timeMs < startMs || timeMs >= endMs)) return;
         const HitResult r = ev.v1Judgement.value_or(ev.judgement);
-        handBucketAdd(out.counts, r);  // miss 只进展示计数
+        handBucketAdd(out.counts, r);  // miss 进 acc 分母 (权重 0)
         if (r == HitResult::Miss) return;
         ++out.n;
-        if (ev.offsetMs) offsets.push_back(*ev.offsetMs);
+        if (withOffset && ev.offsetMs) offsets.push_back(*ev.offsetMs);
     };
 
-    for (const HitEvent& ev : match.events)
-        if (ev.phase == HitPhase::NoteHead) consider(ev, ev.objectTimeMs);
+    for (const HitEvent& ev : match.events) {
+        if (ev.phase == HitPhase::NoteHead) consider(ev, ev.objectTimeMs, true);
+        // V2: LN 头是独立判定 (与总览/选段 counts 同口径); 不采头判偏移样本
+        else if (v2Profile && ev.phase == HitPhase::HoldHead)
+            consider(ev, ev.objectTimeMs, false);
+    }
     for (const HoldJudgement& h : match.holds) {
         if (!seenHolds.insert(h.tail.objectIndex).second) continue;
-        consider(h.tail, h.tail.objectTimeMs);
+        consider(h.tail, h.tail.objectTimeMs, true);
     }
 
-    if (out.n > 0) {
-        // Reuse accuracy.cpp formulas: feed hit-grade counts only (miss
-        // stays 0 and takes no part); rulesScoreV2 => 305 weights
-        // (LegacyScoreV2), else the V1 counts profile.
+    if (out.n + out.counts.miss > 0) {
+        // Reuse accuracy.cpp formulas: miss 计入分母 (judged() 含 miss,
+        // 分子权重 0) — 与总览 acc 同口径, 左右手可对总 acc 对账.
         JudgementCounts c;
         c.perfect = out.counts.max;
         c.great = out.counts.c300;
         c.good = out.counts.c200;
         c.ok = out.counts.c100;
         c.meh = out.counts.c50;
+        c.miss = out.counts.miss;
         out.acc = accuracyPercent(
             c, v2Profile ? AccuracyProfile::LegacyScoreV2
                          : AccuracyProfile::LegacyScoreV1);
@@ -1624,6 +1633,21 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         if (!SessionStore::instance().get(req.matches[1], s))
             return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         const OsrHeader& h = s.replay.header;
+        // 会话级 EffectiveSpeed = replay 帧 y (osr mania 约定 y = EffectiveSpeed,
+        // stable 默认模式下 DT/HT 的 1.5/0.75 因子已烘焙其中; docs/REPLAY.md §3/§4 +
+        // InputAndReplayPlayback IL)。取首个 y>0 帧 (整局常值)。lazer 4 字段帧的 y
+        // 非 EffectiveSpeed, 不透出; 旧版 (<20151010) y 为 displayed 语义, 原样透传
+        // (ReferenceBpm 不可复得, 不做反换算 — 已知差异)。
+        float scrollSpeedEff = 0.f;
+        if (!s.isLazer) {
+            for (const ReplayFrame& f : s.frames) {
+                if (f.isSeedFrame) continue;
+                if (f.y > 0.f) {
+                    scrollSpeedEff = f.y;
+                    break;
+                }
+            }
+        }
         res.set_content(okResponse(json{
             {"player", h.playerName},
             {"gameMode", h.mode},
@@ -1640,7 +1664,10 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                             {"katu", h.countKatu}, {"miss", h.countMiss}}},
             {"keyCount", s.keyCount},
             {"frameCount", s.frames.size()},
-            {"replayPath", s.replayPath}}).dump(),
+            {"replayPath", s.replayPath},
+            {"scrollSpeedEff",
+             scrollSpeedEff > 0.f ? json(static_cast<double>(scrollSpeedEff))
+                                  : json(nullptr)}}).dump(),
                         "application/json");
     });
 
@@ -1690,6 +1717,14 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         if (!SessionStore::instance().get(req.matches[1], s))
             return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
         const OsuBeatmap& b = s.beatmap;
+        // [TimingPoints] 透传 (osu_parser 已有解析): time/beatLength/uninherited。
+        // 前端 stable 滚动模型按此逐段积分 pxPerMs = 21×Eff/BL_eff (SV/换段变速)。
+        json timingPoints = json::array();
+        for (const TimingPoint& tp : b.timingPoints) {
+            timingPoints.push_back(json{{"timeMs", tp.timeMs},
+                                        {"beatLength", tp.beatLength},
+                                        {"uninherited", tp.uninherited}});
+        }
         res.set_content(okResponse(json{
             {"title", b.title}, {"artist", b.artist}, {"creator", b.creator},
             {"version", b.version}, {"beatmapId", b.beatmapId},
@@ -1699,7 +1734,8 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             {"audioFilename", b.audioFilename},
             {"backgroundFile", b.backgroundFile},
             {"objectCount", b.objects.size()},
-            {"beatmapPath", s.beatmapPath}}).dump(),
+            {"beatmapPath", s.beatmapPath},
+            {"timingPoints", std::move(timingPoints)}}).dump(),
                         "application/json");
     });
 
@@ -2223,17 +2259,80 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         ReplaySession s;
         if (!SessionStore::instance().get(req.matches[1], s))
             return sendError(req, res, 404, "SESSION_NOT_FOUND", "unknown session id");
-        if (!s.skinFolder)
-            return sendError(req, res, 404, "SKIN_NOT_LOADED", "no skin loaded");
-        SkinLoader loader = SkinLoader::loadFromFolder(*s.skinFolder);
         std::string element = req.matches[2];
-        auto img = loader.findElement(element);
-        if (!img) return sendError(req, res, 404, "RESOURCE_NOT_FOUND", "no such element");
-        std::string lower = img->fileName;
-        for (char& c : lower) c = static_cast<char>(std::tolower((unsigned char)c));
-        const char* mime = lower.ends_with(".png") ? "image/png" : "image/jpeg";
-        res.set_content(reinterpret_cast<const char*>(img->bytes.data()),
-                        img->bytes.size(), mime);
+        // Lighting 家族不回落默认皮肤: 皮肤缺 lighting 即完全无打击光
+        // (用户对照游戏内实测: 部分皮肤禁灯, 2026-10-27)。
+        std::string elemLower = element;
+        for (char& c : elemLower) c = static_cast<char>(std::tolower((unsigned char)c));
+        const bool isLighting = elemLower.rfind("lighting", 0) == 0;
+        // stable 元素查找店序 (S7 Obf003683, store 位 4→2→1): 谱面目录 → 自定义皮肤 →
+        // 内嵌默认皮肤 (ppy/osu-resources, MIT; 打 X-MRA-Skin-Source: default 头,
+        // 前端对默认 @2x 弱化处理, 自定义 1x 优先)。元素名可带子目录 ("/")。
+        auto serveFile = [&res](const fs::path& p) -> bool {
+            std::error_code fec;
+            if (!fs::is_regular_file(p, fec)) return false;
+            std::vector<uint8_t> bytes;
+            if (auto err = readFileBytes(mra::pathToUtf8(p), bytes)) return false;
+            std::string lower = mra::pathToUtf8(p);
+            for (char& c : lower) c = static_cast<char>(std::tolower((unsigned char)c));
+            const char* mime = lower.ends_with(".png") ? "image/png" : "image/jpeg";
+            res.set_content(reinterpret_cast<const char*>(bytes.data()),
+                            bytes.size(), mime);
+            return true;
+        };
+        // 名字含扩展名 → 只试原名 (R3.2: name 里已含 '.' 则不再补扩展名);
+        // 否则按 .png → .jpg → .jpeg 逐个尝试。
+        auto tryFolder = [&serveFile, &element](const fs::path& dir) -> bool {
+            std::error_code ec;
+            // 拒绝路径穿越 (与 /file/ 端点同一道闸; element 来自 URL, 可能含 "../")
+            if (element.empty() || element.find("..") != std::string::npos)
+                return false;
+            if (dir.empty() || !fs::is_directory(dir, ec)) return false;
+            std::string lower = element;
+            for (char& c : lower) c = static_cast<char>(std::tolower((unsigned char)c));
+            const bool hasExt = lower.size() > 4 &&
+                (lower.ends_with(".png") || lower.ends_with(".jpg") ||
+                 lower.ends_with(".jpeg"));
+            if (hasExt) return serveFile(dir / mra::pathFromUtf8(element));
+            const char* exts[] = {".png", ".jpg", ".jpeg"};
+            for (const char* ext : exts)
+                if (serveFile(dir / mra::pathFromUtf8(element + ext))) return true;
+            return false;
+        };
+        // (1) 谱面目录 (store 4): stable 中谱面目录优先于皮肤 (mania store=7)
+        if (!s.beatmapPath.empty()) {
+            const fs::path beatmapDir = mra::pathFromUtf8(s.beatmapPath).parent_path();
+            if (tryFolder(beatmapDir)) return;
+        }
+        // (2) 自定义皮肤 (store 2)
+        if (s.skinFolder) {
+            SkinLoader loader = SkinLoader::loadFromFolder(*s.skinFolder);
+            auto img = loader.findElement(element);
+            if (img) {
+                std::string lower = img->fileName;
+                for (char& c : lower) c = static_cast<char>(std::tolower((unsigned char)c));
+                const char* mime = lower.ends_with(".png") ? "image/png" : "image/jpeg";
+                res.set_content(reinterpret_cast<const char*>(img->bytes.data()),
+                                img->bytes.size(), mime);
+                return;
+            }
+        }
+        // (3) 内嵌默认皮肤 (store 1); lighting 家族跳过 (皮肤缺 lighting = 无灯)
+        if (!isLighting) {
+            EmbeddedAsset asset;
+            if (mra::loadEmbeddedDefaultSkin(element, asset)) {
+                res.set_header("X-MRA-Skin-Source", "default");
+                res.set_content(reinterpret_cast<const char*>(asset.bytes.data()),
+                                asset.bytes.size(), asset.mime);
+                return;
+            }
+        }
+        // (4) 404: 资源未命中属前端候选链的正常探查, 日志降级为 debug 级
+        // (不再以 "api error" 级刷屏; debug 开启时以 "resource miss" 记录)。
+        debuglog::log("resource miss " + req.method + " " + req.path);
+        res.status = 404;
+        res.set_content(errorResponse("RESOURCE_NOT_FOUND", "no such element").dump(),
+                        "application/json");
     });
 
     // Raw skin file (skin.ini and other whitelisted names), served as text
@@ -2293,6 +2392,8 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         // Auto-derive Data\\r next to scores.db (osu! stable root layout).
         std::string dataRInfo;
         bool dataRAuto = false;
+        std::string songsInfo;
+        bool songsAuto = false;
         {
             std::lock_guard<std::mutex> lock(scoresMutex_);
             scores_ = std::make_unique<ScoresDb>(std::move(db));
@@ -2313,6 +2414,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
             // Data\r may change together with scores.db; keep the file cache
             // so the next refresh only stat-s instead of re-reading headers.
             dataRStampValid_ = false;
+            songsStampValid_ = false;
             fs::path derived = mra::pathFromUtf8(path).parent_path() /
                                "Data" / "r";
             std::error_code ec;
@@ -2325,6 +2427,22 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                 dataRAuto_ = false;
                 dataRInfo = "no Data\\r next to scores.db - pick it manually";
             }
+            // Auto-derive Songs next to scores.db the same way (osu! stable
+            // root layout: <root>/Songs holds the beatmap folders). Like
+            // Data\r above, a failed derive clears a previously bound
+            // folder, and a manual pick wins only until the next reload.
+            fs::path derivedSongs =
+                mra::pathFromUtf8(path).parent_path() / "Songs";
+            if (fs::exists(derivedSongs, ec) &&
+                fs::is_directory(derivedSongs, ec)) {
+                songsFolder_ = mra::pathToUtf8(derivedSongs);
+                songsAuto_ = true;
+                songsAuto = true;
+            } else {
+                songsFolder_.clear();
+                songsAuto_ = false;
+                songsInfo = "no Songs next to scores.db - pick it manually";
+            }
         }
         mergeLastState({{"scores", path}});
         if (dataRAuto)
@@ -2332,6 +2450,12 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                              [&] {
                                  std::lock_guard<std::mutex> l(scoresMutex_);
                                  return dataRFolder_;
+                             }()}});
+        if (songsAuto)
+            mergeLastState({{"songs",
+                             [&] {
+                                 std::lock_guard<std::mutex> l(scoresMutex_);
+                                 return songsFolder_;
                              }()}});
         res.set_content(okResponse(json{{"version", dbVersion},
                                         {"groups", groupCount},
@@ -2344,7 +2468,15 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                                                  scoresMutex_);
                                              return dataRFolder_;
                                          }()},
-                                        {"dataRHint", dataRInfo}})
+                                        {"dataRHint", dataRInfo},
+                                        {"songsAuto", songsAuto},
+                                        {"songsFolder",
+                                         [&] {
+                                             std::lock_guard<std::mutex> l(
+                                                 scoresMutex_);
+                                             return songsFolder_;
+                                         }()},
+                                        {"songsHint", songsInfo}})
                             .dump(),
                         "application/json");
     });
@@ -2383,7 +2515,9 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
                         "application/json");
     });
 
-    // Songs folder registration (must be chosen before browsing/loading).
+    // Manual Songs registration (auto-derived from the scores.db root when
+    // present; a manual pick disables the auto flag until scores.db is
+    // reloaded). Must be set before browsing/loading.
     svr.Post("/api/scores/songs",
              [this](const httplib::Request& req, httplib::Response& res) {
         json body;
@@ -2404,6 +2538,7 @@ void ApiServer::registerRoutes(httplib::Server& svr) {
         {
             std::lock_guard<std::mutex> lock(scoresMutex_);
             songsFolder_ = folder;
+            songsAuto_ = false;
             songsIndexBuilt_ = false;
             songsStampValid_ = false;
         }

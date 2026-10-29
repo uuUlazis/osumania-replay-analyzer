@@ -86,10 +86,13 @@ ReplayFrameDecodeResult decodeReplayFrames(
         }
 
         // Mania records: osu!stable writes "w|x|y", lazer writes
-        // "w|x|y|z" with y as FLOAT text ("20.83333"). Only w and x are
-        // meaningful here: w = ms since the previous frame, x = pressed
-        // column bitmask (bit c = column c). y/z (cursor position, unused
-        // for mania) are ignored and never parsed.
+        // "w|x|y|z" with y as FLOAT text ("20.83333"). w = ms since the
+        // previous frame, x = pressed column bitmask (bit c = column c).
+        // y = EffectiveSpeed for stable mania frames (docs/REPLAY.md §3 +
+        // InputAndReplayPlayback IL: new ReplayFrame(now, keyMask,
+        // (float)ManiaScrollSpeed.EffectiveSpeed, ...)) and is preserved in
+        // ReplayFrame.y for the renderer's scroll model (session-level
+        // scrollSpeedEff). Parse failure keeps y = 0 (legacy behavior).
         long long w = 0, x = 0;
         size_t p1 = line.find('|');
         if (p1 == std::string_view::npos) { result.malformedLines++; continue; }
@@ -115,6 +118,19 @@ ReplayFrameDecodeResult decodeReplayFrames(
         frame.timeMs = absoluteTime;
         frame.x = static_cast<float>(x);
         frame.y = 0.0f;
+        {
+            // y token: stop at a 4th field (lazer "w|x|y|z"); float text.
+            size_t p3 = line.find('|', p2 + 1);
+            size_t yEnd = p3 == std::string_view::npos ? line.size() : p3;
+            std::string_view yTok = line.substr(p2 + 1, yEnd - p2 - 1);
+            if (!yTok.empty()) {
+                float yValue = 0.f;
+                auto [yPtr, yEc] = std::from_chars(yTok.data(),
+                                                   yTok.data() + yTok.size(),
+                                                   yValue);
+                if (yEc == std::errc()) frame.y = yValue;
+            }
+        }
         frame.rawKeys = static_cast<uint32_t>(x) & 0x3FFFFFFFu;
         frame.keyDownMask = frame.rawKeys & ~previousKeys;
         frame.keyUpMask = ~frame.rawKeys & previousKeys;

@@ -8,6 +8,7 @@
 #endif
 #include <windows.h>
 
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 
@@ -97,6 +98,29 @@ AssetProvider makeDefaultAssetProvider(const std::wstring& distDir) {
         out.mime = mimeForPath(key);
         return true;
     };
+}
+
+bool loadEmbeddedDefaultSkin(const std::string& element, EmbeddedAsset& out) {
+#if MANIA_HAS_EMBEDDED
+    auto lowerOf = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string want = lowerOf(element);
+    if (want.empty()) return false;
+    for (const auto& f : kEmbeddedFiles) {
+        std::string path = lowerOf(f.path);
+        if (path.rfind("default-skin/", 0) != 0) continue;
+        const std::string base = path.substr(std::strlen("default-skin/"));
+        if (base != want && base != want + ".png") continue;
+        std::vector<uint8_t> bytes;
+        if (!loadEmbeddedResource(f.resourceId, bytes)) continue;
+        out.mime = f.mime;
+        out.bytes = std::move(bytes);
+        return true;
+    }
+#endif
+    return false;
 }
 
 }  // namespace mra

@@ -96,6 +96,11 @@ export default function App() {
     const lazerNc =
       summary.lazerMods?.some((m) => m.acronym === "NC") ?? false;
     playerStore.setNightcore(!!(mods & 512) || lazerNc);
+    // 落速滑条 = 唯一速度源: 会话载入时用回放帧 y (EffectiveSpeed, stable mania 约定)
+    // 初始化滑条; 之后用户拖动即直接覆盖 (修复 scrollSpeedEff 恒优先压死滑条的问题)。
+    if (typeof replay.scrollSpeedEff === "number" && replay.scrollSpeedEff > 0) {
+      playerStore.setScrollSpeed(replay.scrollSpeedEff);
+    }
 
     playerStore.setDuration(
       Math.max(
@@ -118,6 +123,12 @@ export default function App() {
       objects: objects.objects,
       frames: frames.frames,
       lastEventTimeMs: summary.lastEventTimeMs,
+      // 会话级 EffectiveSpeed = replay 帧 y (stable mania 约定); 无 y (旧版/lazer 局)
+      // → null, 渲染回退 UI speed。
+      scrollSpeedEff:
+        typeof replay.scrollSpeedEff === "number" && replay.scrollSpeedEff > 0
+          ? replay.scrollSpeedEff
+          : null,
     });
   }, []);
 
@@ -319,7 +330,7 @@ export default function App() {
             <>
               <AudioSync />
               <Timeline />
-              <ReplayPreview />
+              <ReplayPreview brickDefault={!skinFolder} />
               <Transport />
             </>
           )}

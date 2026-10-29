@@ -157,6 +157,9 @@ export interface ReplayMetadata {
   keyCount: number;
   frameCount: number;
   replayPath: string;
+  // 会话级 EffectiveSpeed = replay 帧 y (osr mania 约定; stable 默认模式 DT/HT 的
+  // 1.5/0.75 已烘焙其中)。缺省/lazer 局/无 y → undefined, 前端回退 UI speed。
+  scrollSpeedEff?: number;
 }
 
 export interface BeatmapMetadata {
@@ -174,6 +177,8 @@ export interface BeatmapMetadata {
   backgroundFile: string;
   objectCount: number;
   beatmapPath: string;
+  // [TimingPoints] 透传 (stable 滚动模型用; 旧后端不返回 → undefined = 单一 BL600 段回退)
+  timingPoints?: import("../render/maniaSkin").TimingPointDto[];
 }
 
 export interface ManiaObject {
@@ -293,6 +298,9 @@ export interface ScoresLoadResult {
   dataRAuto: boolean;
   dataRFolder: string;
   dataRHint: string;
+  songsAuto: boolean;
+  songsFolder: string;
+  songsHint: string;
 }
 
 export interface ScoreBrowseRow {
@@ -432,7 +440,7 @@ export const MOD_NAMES: [number, string][] = [
   [536870912, "V2"],
 ];
 // ---- 左右手分析 (POST /api/analysis/{sid}/hands) ----
-// 单侧判定计数 (幽灵物件由后端排除; miss 仅展示, 不进 n/acc/偏差)
+// 单侧判定计数 (幽灵物件由后端排除; miss 进 acc 分母权重 0, 不进 n/偏差)
 export interface HandJudgementCounts {
   max: number;
   c300: number;

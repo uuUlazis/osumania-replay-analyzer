@@ -17,7 +17,7 @@ interface Props {
   onClose: () => void;
 }
 
-// 六档判定行: label + 显示色 (miss 仅展示, 不进 n/acc/偏差)
+// 六档判定行: label + 显示色 (miss 计入 acc 分母, 不进 n/偏差)
 const COUNT_ROWS: { key: keyof HandAnalysisResponse["left"]["counts"]; label: string; color: string }[] = [
   { key: "max", label: "300g", color: "#57c8ff" },
   { key: "c300", label: "300", color: "#d9c358" },

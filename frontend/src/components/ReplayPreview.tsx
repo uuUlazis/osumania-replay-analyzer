@@ -13,10 +13,25 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { sessionStore } from "../app/sessionStore";
 import { playerStore } from "../app/playerStore";
 import { drawPlayfield } from "../render/maniaRenderer";
-import { loadManiaSkin, visibleTimeMs, type ManiaSkin } from "../render/maniaSkin";
+import {
+  loadManiaSkin,
+  scrollWindowMs,
+  type ManiaSkin,
+  type TimingPointDto,
+} from "../render/maniaSkin";
 import type { ManiaObject } from "../models/types";
 
-export default function ReplayPreview() {
+// KeyCoop mod (1<<25): 无 ini SplitStages 时强制拆分舞台 (A1 R2.4)
+const KEY_MOD_COOP = 1 << 25;
+
+interface Props {
+  // 无自定义皮肤会话 (「默认皮肤」= 未选皮肤文件夹): 渲染器走砖块回退
+  // (0.1.1 观感), 不加载也不绘制 osu 默认皮肤元素 — osu 默认池只作
+  // 自定义皮肤缺省填充 (2026-10-28 用户定案)。
+  brickDefault?: boolean;
+}
+
+export default function ReplayPreview({ brickDefault = false }: Props) {
   const snap = useSyncExternalStore(sessionStore.subscribe, sessionStore.get);
   // 皮肤经 ref 桥接给 rAF 循环 (循环仅会话级重建)
   const skinRef = useRef<ManiaSkin | null>(null);
@@ -31,6 +46,7 @@ export default function ReplayPreview() {
   const keyCount = snap.beatmap?.keyCount ?? 4;
   const judgeVersion = snap.analysis?.rulesProfile === "v2" ? "v2" : "v1";
   const isLazer = snap.analysis?.scoreSource === "lazer";
+  const coop = !!(snap.replay && snap.replay.mods & KEY_MOD_COOP);
 
   // skin loads once per session (ini + per-column images)
   useEffect(() => {
@@ -38,7 +54,7 @@ export default function ReplayPreview() {
     setSkin(null);
     skinRef.current = null;
     if (snap.sessionId) {
-      loadManiaSkin(snap.sessionId, keyCount).then((loaded) => {
+      loadManiaSkin(snap.sessionId, keyCount, coop, brickDefault).then((loaded) => {
         if (!cancelled) {
           skinRef.current = loaded;
           setSkin(loaded);
@@ -46,7 +62,7 @@ export default function ReplayPreview() {
       });
     }
     return () => { cancelled = true; };
-  }, [snap.sessionId, keyCount, skinRev]);
+  }, [snap.sessionId, keyCount, skinRev, coop, brickDefault]);
 
   // ---- 独立 rAF 渲染循环: 不经 React, 每帧直读 store ----
   useEffect(() => {
@@ -95,21 +111,33 @@ export default function ReplayPreview() {
       const events =
         judgeVersion2 === "v2" && s2.eventsV2.length ? s2.eventsV2 : s2.events;
 
+      // 速度源 = UI 滑条 (playerStore.scrollSpeed): 会话载入时已用回放帧 y (Eff)
+      // 初始化, 拖动即覆盖 — 唯一来源。渲染层不乘/除 rate (播放时钟已按 rate 前进)。
+      const eff = Math.max(1, Math.min(40, st.scrollSpeed || 12));
+      const timingPoints: TimingPointDto[] | undefined = s2.beatmap?.timingPoints;
+      // 保守裁剪窗: 按最大有效 BL 的全屏穿越时间 (SV 安全裕量), 入/出对称
+      const windowMs = scrollWindowMs(eff, timingPoints);
+
       // 皮肤未就绪 (会话已载入): 不画, 由灰屏遮罩接管
       if (s2.sessionId && !skinRef.current) return;
 
       drawPlayfield(ctx, rect.width, rect.height, {
         previewTimeMs: t,
-        objects: objsWindow(s2, t, windowMsOf(st)),
+        objects: objsWindow(s2, t, windowMs),
         events,
         keyState: ks,
         skin: skinRef.current,
         scrollSpeed: st.scrollSpeed,
-        windowMs: windowMsOf(st),
+        effSpeed: eff,
+        timingPoints,
+        windowMs,
         rate: st.rate || 1,
-        showInputJudges: st.showInputJudges,
+        showInputJudges: st.judgementOnly || st.showInputJudges,
+        judgementOnly: st.judgementOnly,
+        brickDefault,
         judgeVersion: judgeVersion2,
         lazerMode: isLazer2,
+        coop: !!(s2.replay && s2.replay.mods & KEY_MOD_COOP),
       });
     };
     raf = requestAnimationFrame(loop);
@@ -117,7 +145,7 @@ export default function ReplayPreview() {
       alive = false;
       cancelAnimationFrame(raf);
     };
-  }, [snap.sessionId, keyCount, skinRev, isLazer, judgeVersion, skin]);
+  }, [snap.sessionId, keyCount, skinRev, isLazer, judgeVersion, skin, coop]);
 
   return (
     <div className="preview-wrap">
@@ -131,13 +159,13 @@ export default function ReplayPreview() {
     </div>
   );
 }
-function objsWindow(
-  s2: { objects: ManiaObject[] },
-  t: number,
-  windowMs: number,
-): ManiaObject[] {
-  const objs = s2.objects;
-  if (!objs.length) return [];
+// 二分裁剪: 入窗 = startTimeMs − t ≤ windowMs (head 最先入屏); 出窗 = endT − t ≥
+// −windowMs (对称保守, SV 大拍长段不掉音符)。maxHold 按数组引用 WeakMap 缓存,
+// 免每帧全量扫描 (2026-10-26 性能定案的延伸)。
+const maxHoldCache = new WeakMap<ManiaObject[], number>();
+function maxHoldOf(objs: ManiaObject[]): number {
+  const cached = maxHoldCache.get(objs);
+  if (cached !== undefined) return cached;
   let maxHold = 0;
   for (const o of objs) {
     if (o.endTimeMs) {
@@ -145,7 +173,17 @@ function objsWindow(
       if (d > maxHold) maxHold = d;
     }
   }
-  const lead = 800 + maxHold;
+  maxHoldCache.set(objs, maxHold);
+  return maxHold;
+}
+function objsWindow(
+  s2: { objects: ManiaObject[] },
+  t: number,
+  windowMs: number,
+): ManiaObject[] {
+  const objs = s2.objects;
+  if (!objs.length) return [];
+  const lead = windowMs + maxHoldOf(objs);
   let lo = 0, hi = objs.length;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
@@ -155,12 +193,7 @@ function objsWindow(
   for (let i = lo; i < objs.length && objs[i].startTimeMs - t <= windowMs; ++i) {
     const o = objs[i];
     const endT = o.endTimeMs ?? o.startTimeMs;
-    if (endT - t >= -800) out.push(o);
+    if (endT - t >= -windowMs) out.push(o);
   }
   return out;
-}
-
-
-function windowMsOf(st: { scrollSpeed: number; rate: number }): number {
-  return (visibleTimeMs(st.scrollSpeed) + 300) * (st.rate || 1);
 }

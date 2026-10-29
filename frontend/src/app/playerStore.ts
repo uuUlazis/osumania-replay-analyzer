@@ -3,12 +3,14 @@ export interface PlayerSnapshot {
   previewTimeMs: number;
   durationMs: number;
   playing: boolean;
-  // Preview scroll speed (lazer mania scale 1..40; visible time 11485/s ms).
+  // 落速 (Eff 直控语义, 1..40): replay 无 y 时作为滚动速度源; visible time 按
+  // 402×BL/(21×Eff) 近似 (stable 缺省 12, 旧 lazer 缺省 22 已改)。
   scrollSpeed: number;
   // active timeline selection (null = none). Half-open [startMs, endMs).
   selection: { startMs: number; endMs: number } | null;
   // replay-preview judgement overlay (input ticks + object outlines)
   showInputJudges: boolean;
+  judgementOnly: boolean;
   // optional session music object URL (null = no audio)
   musicUrl: string | null;
   // music volume 0..1
@@ -32,9 +34,10 @@ let state: PlayerSnapshot = {
   previewTimeMs: 0,
   durationMs: 0,
   playing: false,
-  scrollSpeed: 22,
+  scrollSpeed: 12,
   selection: null,
   showInputJudges: true,
+  judgementOnly: false,
   musicUrl: null,
   volume: 1,
   rate: 1,
@@ -149,6 +152,10 @@ export const playerStore = {
     state = { ...state, showInputJudges: v };
     emit();
   },
+  setJudgementOnly(v: boolean) {
+    state = { ...state, judgementOnly: v };
+    emit();
+  },
   setNightcore(v: boolean) {
     if (v !== state.nightcore) {
       state = { ...state, nightcore: v };
@@ -169,7 +176,7 @@ export const playerStore = {
     emit();
   },
   setScrollSpeed(speed: number) {
-    const s = Math.max(1, Math.min(40, Math.round(speed) || 22));
+    const s = Math.max(1, Math.min(40, Math.round(speed) || 12));
     state = { ...state, scrollSpeed: s };
     emit();
   },

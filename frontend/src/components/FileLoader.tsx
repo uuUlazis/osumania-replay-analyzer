@@ -81,6 +81,8 @@ export default function FileLoader({
   const [dataRPath, setDataRPath] = useState("");
   const [dataRHint, setDataRHint] = useState("");
   const [songsPath, setSongsPath] = useState("");
+  const [songsAuto, setSongsAuto] = useState(false);
+  const [songsHint, setSongsHint] = useState("");
   const [scoresLoading, setScoresLoading] = useState(false);
   const [dialogError, setDialogError] = useState("");
   const [lastPaths, setLastPaths] = useState<
@@ -190,8 +192,17 @@ export default function FileLoader({
         setDataRAuto(result.dataRAuto);
         setDataRPath(result.dataRFolder);
         setDataRHint(result.dataRHint);
+        // Songs auto-derives on the same response; a failed derive clears
+        // any previously bound folder exactly like Data\\r above.
+        setSongsAuto(result.songsAuto);
+        setSongsPath(result.songsFolder);
+        setSongsHint(result.songsHint);
         onScoresLoaded(res.path, result);
-        rememberPaths(res.path, result.dataRFolder || dataRPath, songsPath);
+        rememberPaths(
+          res.path,
+          result.dataRFolder || dataRPath,
+          result.songsFolder || songsPath,
+        );
       } finally {
         setScoresLoading(false);
       }
@@ -267,7 +278,16 @@ export default function FileLoader({
         setDataRHint("");
       }
       onScoresDatar(lastPaths.dataR);
-      await api.scoresSongs(lastPaths.songs);
+      // Auto-derive already bound the remembered Songs when it matches;
+      // re-bind explicitly only on a difference (mirrors Data\\r above).
+      if (lastPaths.songs !== result.songsFolder) {
+        await api.scoresSongs(lastPaths.songs);
+        setSongsAuto(false);
+        setSongsHint("");
+      } else {
+        setSongsAuto(result.songsAuto);
+        setSongsHint(result.songsHint);
+      }
       setSongsPath(lastPaths.songs);
       onScoresSongs(lastPaths.songs);
       setRestoreOpen(false);
@@ -549,10 +569,14 @@ export default function FileLoader({
                 onClick={pickSongs}
                 title={songsPath}
               >
-                {songsPath ? "Songs 已选" : "Songs 目录"}
+                {songsPath
+                  ? songsAuto
+                    ? "Songs 已自动找到"
+                    : "Songs 已选"
+                  : "Songs 目录"}
               </button>
               <span className="path" title={songsPath}>
-                {songsPath || "未选择"}
+                {songsPath || songsHint || "未选择"}
               </span>
             </div>
             <div className="half">

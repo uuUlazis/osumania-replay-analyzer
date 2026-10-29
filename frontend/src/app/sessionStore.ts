@@ -20,6 +20,8 @@ export interface SessionSnapshot {
   eventsV2: Hit[];  // ScoreV2 match — 判定规则 V2 view
   frames: ReplayFrameDto[];
   lastEventTimeMs: number;
+  // 会话级 EffectiveSpeed (replay 帧 y; null = 无, 回退 UI speed)
+  scrollSpeedEff: number | null;
 }
 
 let state: SessionSnapshot = {
@@ -32,6 +34,7 @@ let state: SessionSnapshot = {
   eventsV2: [],
   frames: [],
   lastEventTimeMs: 0,
+  scrollSpeedEff: null,
 };
 
 const listeners = new Set<() => void>();
@@ -59,6 +62,7 @@ export const sessionStore = {
       eventsV2: [],
       frames: [],
       lastEventTimeMs: 0,
+      scrollSpeedEff: null,
     };
     emit();
   },

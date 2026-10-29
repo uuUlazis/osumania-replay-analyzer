@@ -89,6 +89,7 @@ class ApiServer {
     std::string dataRFolder_;
     bool dataRAuto_ = false;
     std::string songsFolder_;
+    bool songsAuto_ = false;
     // Lazily built indexes: replayMd5 -> .osr path inside Data\r, and
     // beatmapMd5 -> beatmap metadata inside Songs. Rebuilt when folders change.
     std::map<std::string, std::string> replayIndex_;

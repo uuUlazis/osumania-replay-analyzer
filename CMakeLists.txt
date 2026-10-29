@@ -12,7 +12,7 @@ add_compile_options(/W4 /utf-8 /EHsc /permissive- /Zc:__cplusplus)
 add_compile_definitions(
     UNICODE _UNICODE
     WIN32_LEAN_AND_MEAN NOMINMAX
-    MANIA_REPLAY_ANALYZER_VERSION="0.1.0")
+    MANIA_REPLAY_ANALYZER_VERSION="0.1.3")
 
 set(MRA_BACKEND ${CMAKE_CURRENT_SOURCE_DIR}/backend)
 set(MRA_GENERATED ${CMAKE_BINARY_DIR}/generated)
@@ -25,13 +25,18 @@ add_library(mra_lzma STATIC
 target_include_directories(mra_lzma PUBLIC ${MRA_BACKEND}/third_party/lzma)
 
 # ---- Frontend embedding ----
+# 0.1.3 packaging (2026-10-29): frontend/dist ships as a folder next to the exe
+# (makeDefaultAssetProvider serves it from disk); only the default skin stays
+# embedded. Exe must keep frontend/dist alongside or the page will 404.
+set(MRA_NO_EMBED_FRONTEND ON)
 set(MRA_FRONTEND_DIST ${CMAKE_CURRENT_SOURCE_DIR}/frontend/dist)
 if(EXISTS ${MRA_FRONTEND_DIST}/index.html)
-    message(STATUS "Embedding frontend from ${MRA_FRONTEND_DIST}")
+    message(STATUS "Frontend served from disk: ${MRA_FRONTEND_DIST} (not embedded)")
 else()
-    message(STATUS "No frontend dist found at ${MRA_FRONTEND_DIST}; building shell-only (dev)")
+    message(STATUS "No frontend dist at ${MRA_FRONTEND_DIST}; page will 404 unless dist ships next to the exe")
 endif()
-mra_generate_embedded(${MRA_FRONTEND_DIST} ${MRA_GENERATED})
+set(MRA_SKIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/backend/assets/default-skin)
+mra_generate_embedded(${MRA_FRONTEND_DIST} ${MRA_GENERATED} ${MRA_SKIN_DIR})
 
 # ---- Core static library (all backend modules except app entry) ----
 set(MRA_CORE_SOURCES
