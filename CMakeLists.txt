@@ -12,7 +12,7 @@ add_compile_options(/W4 /utf-8 /EHsc /permissive- /Zc:__cplusplus)
 add_compile_definitions(
     UNICODE _UNICODE
     WIN32_LEAN_AND_MEAN NOMINMAX
-    MANIA_REPLAY_ANALYZER_VERSION="0.1.3")
+    MANIA_REPLAY_ANALYZER_VERSION="0.1.4")
 
 set(MRA_BACKEND ${CMAKE_CURRENT_SOURCE_DIR}/backend)
 set(MRA_GENERATED ${CMAKE_BINARY_DIR}/generated)

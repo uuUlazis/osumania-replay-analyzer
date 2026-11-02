@@ -67,6 +67,56 @@ export default function App() {
     return () => document.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
+  // 快捷键 (0.1.4): 空格 = 播放/暂停。输入控件聚焦时不拦截 (右键白名单口径,
+  // 另放行 contenteditable); 忽略长按自动重复; 无会话不动作。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || e.repeat) return;
+      const t = e.target;
+      if (t instanceof Element &&
+          t.closest("input, textarea, select, [contenteditable='true']")) {
+        return;
+      }
+      e.preventDefault();
+      if (sessionStore.get().sessionId) playerStore.toggle();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // 快捷键 (0.1.4): 鼠标滚轮 = 调节播放进度。下滚=前进 / 上滚=后退,
+  // 1 格 = ±1s, Shift = ±5s。左栏可滚动容器 (总结/选段/成绩库/弹窗) 保留原生滚动
+  // 不劫持; 触控板连续小增量按 100 归一累加; 无会话不动作。
+  useEffect(() => {
+    let acc = 0;
+    const onWheel = (e: WheelEvent) => {
+      if (!sessionStore.get().sessionId) return;
+      const t = e.target;
+      if (!(t instanceof Element) || t.closest("input, textarea, select")) return;
+      for (let el: Element | null = t; el; el = el.parentElement) {
+        const ov = getComputedStyle(el).overflowY;
+        if ((ov === "auto" || ov === "scroll") && el.scrollHeight > el.clientHeight) {
+          return;
+        }
+      }
+      e.preventDefault();
+      const dy =
+        e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 100 : e.deltaY;
+      acc += dy;
+      const notches = Math.trunc(Math.abs(acc) / 100);
+      if (notches <= 0) return;
+      const dir = acc > 0 ? 1 : -1; // 下滚 (deltaY>0) = 前进
+      acc -= Math.sign(acc) * notches * 100;
+      const st = playerStore.get();
+      if (st.durationMs <= 0) return;
+      const step = (e.shiftKey ? 5000 : 1000) * notches;
+      const nt = Math.min(st.durationMs, Math.max(0, st.previewTimeMs + dir * step));
+      playerStore.seek(nt);
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, []);
+
   // 载入后的公共数据获取 (stable 手动/成绩库 与 lazer 成绩库共用):
   // metadata / summary / 双规则 hits / objects / frames → 各 store。
   const hydrateSession = useCallback(async (sessionId: string) => {
@@ -96,11 +146,9 @@ export default function App() {
     const lazerNc =
       summary.lazerMods?.some((m) => m.acronym === "NC") ?? false;
     playerStore.setNightcore(!!(mods & 512) || lazerNc);
-    // 落速滑条 = 唯一速度源: 会话载入时用回放帧 y (EffectiveSpeed, stable mania 约定)
-    // 初始化滑条; 之后用户拖动即直接覆盖 (修复 scrollSpeedEff 恒优先压死滑条的问题)。
-    if (typeof replay.scrollSpeedEff === "number" && replay.scrollSpeedEff > 0) {
-      playerStore.setScrollSpeed(replay.scrollSpeedEff);
-    }
+    // 落速 = 纯用户偏好 (同音量语义, 2026-11-03 验收定案): 启动时从 last_state
+    // 恢复一次, Transport 修改时写回; 会话载入不再用回放帧 Eff 重置滑条
+    // (旧「载入时 Eff 初始化」行为废除 — 它覆盖用户记忆值, 表现为落速丢记忆)。
 
     playerStore.setDuration(
       Math.max(

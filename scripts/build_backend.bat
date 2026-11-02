@@ -2,7 +2,7 @@
 rem Build backend only (skip frontend vite build) - for fast iteration.
 rem 0.1.3+: source root = versions/<ver>, deploy target = versions/<ver>/ManiaReplayAnalyzer.exe.
 setlocal enabledelayedexpansion
-set "VER=0.1.3"
+set "VER=0.1.4"
 for %%i in ("%~dp0..") do set "ROOT=%~dp0.."
 for %%i in ("%~dp0..") do set "ROOT=%%~fi"
 set "VCVARS=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"

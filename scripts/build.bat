@@ -2,7 +2,7 @@
 rem Build the single executable: frontend dist -> embedded resources -> exe.
 rem 0.1.3+: source root = versions/<ver>, deploy target = versions/<ver>/ManiaReplayAnalyzer.exe.
 setlocal enabledelayedexpansion
-set "VER=0.1.3"
+set "VER=0.1.4"
 
 rem Canonical workspace root (resolves %~dp0.. to an absolute path).
 for %%i in ("%~dp0..") do set "ROOT=%%~fi"
